@@ -6,8 +6,11 @@ export type Configuration = {
   serialDevice: string;
 } & Omit<NtripOptions, 'xyz'> & Position
 
+// Module-level debug function, set from app.debug in the plugin factory
+let debug: (fmt: string, ...args: any[]) => void = () => {}
 
 const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
+  debug = (app as any).debug.bind(app)
   const selfContext = 'vessels.' + app.selfId;
 
   const knownNmeaConnections: any[] = []
@@ -36,7 +39,7 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
 
   let serialWrite = (x: any) => undefined
   app.onPropertyValues('serialport', (values) => {
-    console.log('Serial ports:', values);
+    debug('Serial ports: %j', values);
     values.filter(v => v).forEach(({ value }) => {
       if (!knownSerialPorts.includes(value.id)) {
         knownSerialPorts.push(value.id);
@@ -151,7 +154,8 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
             onClose: () => {
               updatePluginStatus
             },
-            onStationData: (delta: any) => app.handleMessage('N/A', delta)
+            onStationData: (delta: any) => app.handleMessage('N/A', delta),
+            debug: (app as any).debug.bind(app)
           })
         }
 
@@ -169,7 +173,7 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
       updatePluginStatus();
       app.onPropertyValues('pipedprovider', (values) => {
         values.filter(v => v).forEach(({ value }) => {
-          console.log(value)
+          debug('%j', value)
           if (value.type === 'Multiplexed') {
             if (knownNmeaConnections.indexOf(value.id) === -1) {
               knownNmeaConnections.push(value.id);
@@ -409,30 +413,30 @@ const HEADING_TRUE_INDEX = CONVERTERS.UNIHEADINGA.findIndex(c => c.path === 'nav
 // (i.e. everything up to first semicolon)
 // which lets field indexes match UM982 documentation
 const uniheadingAParser = (parts: string[], sentence: string) => {
-  console.log('UNIHEADINGA received:', sentence);
+  debug('UNIHEADINGA received: %s', sentence);
 
   // Split by semicolon first to separate header from data
   const [headerSection, dataSection] = sentence.split(';');
 
   if (!dataSection) {
-    console.log('No data section found after semicolon');
+    debug('No data section found after semicolon');
     return [];
   }
 
   // Parse data section by commas (remove checksum if present)
   const dataFields = dataSection.split('*')[0].split(',');
 
-  console.log('UNIHEADINGA data fields:', dataFields);
+  debug('UNIHEADINGA data fields: %j', dataFields);
 
   const parsed = CONVERTERS.UNIHEADINGA.map(c => ({
     path: c.path,
     value: c.convert(dataFields[c.index])
   } as PathValue))
 
-  console.log('UNIHEADINGA parsed values:', parsed);
+  debug('UNIHEADINGA parsed values: %j', parsed);
 
   if (parsed[POSITION_TYPE_INDEX].value === 'NONE') {
-    console.log('Position type is NONE, setting heading to null');
+    debug('Position type is NONE, setting heading to null');
     parsed[HEADING_TRUE_INDEX].value = null;
   }
 
@@ -472,7 +476,7 @@ const sample = [
 ]
 
 function validateConfiguration(obj: any): obj is Configuration {
-  console.log(obj)
+  debug('%j', obj)
   if (!obj || typeof obj !== 'object') {
     return false;
   }
