@@ -272,9 +272,12 @@ const modeParser = (parts: string[]) => [{
 } as PathValue];
 
 const hprParser = (parts: string[]) => {
+  const heading = parts[2];
   return [{
     path: 'navigation.headingTrue',
-    value: (parseFloat(parts[2]) + 90) * Math.PI / 180
+    value: heading === '' || heading === '0.0000'
+      ? null
+      : ((parseFloat(heading) + 90) % 360) * Math.PI / 180
   }
   ] as PathValue[]
 }
