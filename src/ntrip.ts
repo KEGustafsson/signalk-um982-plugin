@@ -135,7 +135,8 @@ export function ecefToLatLon(x: number, y: number, z: number): { latitude: numbe
   const f = 1 / 298.257223563; // Flattening
   const e2 = 2 * f - f * f; // First eccentricity squared
 
-  // Convert from millimeters to meters (RTCM coordinates are typically in mm)
+  // RTCM 1005/1006 ARP ECEF coordinates have a resolution of 0.0001 m (0.1 mm)
+  // and are returned by the decoder as raw signed integers, so divide by 10000 to get meters.
   const X = x / 10000;
   const Y = y / 10000;
   const Z = z / 10000;
