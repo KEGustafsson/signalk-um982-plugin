@@ -69,10 +69,11 @@ export type NtripConfig = {
   onError: (err: any) => void
   onClose: () => void
   onStationData: (delta: any) => void
+  debug?: (fmt: string, ...args: any[]) => void
 }
 
 export const startRTCM = (params: NtripConfig): (() => void) => {
-  const { options, onData, onStationData, onClose, onError } = params;
+  const { options, onData, onStationData, onClose, onError, debug = () => {} } = params;
   const options_: NtripOptions = {
     xyz: latLonToECEF(options.latitude, options.longitude, 0),
     ...options
@@ -91,12 +92,12 @@ export const startRTCM = (params: NtripConfig): (() => void) => {
   });
 
   client.on('close', () => {
-    console.log('NTRIP client closed');
+    debug('NTRIP client closed');
     onClose();
   });
 
   client.on('error', (err: any) => {
-    console.log('NTRIP client error:', err);
+    debug('NTRIP client error: %o', err);
     onError(err);
   });
 
@@ -104,7 +105,7 @@ export const startRTCM = (params: NtripConfig): (() => void) => {
 
   // Return cleanup function
   return () => {
-    console.log('Closing NTRIP client...');
+    debug('Closing NTRIP client...');
     if (client && typeof client.close === 'function') {
       client.close();
     } else if (client && typeof client.destroy === 'function') {
