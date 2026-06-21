@@ -391,12 +391,7 @@ const bestSatParser = (parts: string[], sentence: string) => {
     });
   }
 
-  return [{
-    path: 'navigation.gnss.satellitesUsed',
-    value: {
-      satellites: satellites
-    }
-  } as PathValue];
+  return [];
 };
 
 const CONVERTERS = {
