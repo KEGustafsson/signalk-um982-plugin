@@ -275,13 +275,27 @@ const modeParser = (parts: string[]) => [{
   value: parts.slice(1).join(',')
 } as PathValue];
 
+// $GNHPR field layout (UM982 reference manual, Table 7-42 GPHPR):
+//   parts[0]=$--HPR  parts[1]=utc  parts[2]=heading  parts[3]=pitch
+//   parts[4]=roll  parts[5]=QF (solution quality)  parts[6]=sat No ...
+// QF: 0=fix invalid, 1=single, 2=DGPS, 4=RTK fix, 5=RTK float,
+//     6=dead reckoning, 7=manual, 8=extra wide-lane, 9=SBAS.
+// The QF field is the authoritative validity flag — when it is 0 there is no
+// solution and the heading must be reported as null (instead of flickering to
+// 90deg via the +90 offset). parts[5] may be missing on older firmware, in
+// which case we fall back to treating a numeric-zero heading as no-fix.
 const hprParser = (parts: string[]) => {
-  const heading = parts[2];
+  const qf = parts[5];
+  const heading = parseFloat(parts[2]);
+  debug('GNHPR fields: %j (heading=%s, QF=%s)', parts, parts[2], qf);
+  const noFix = qf !== undefined
+    ? qf === '0' || qf === ''
+    : isNaN(heading) || heading === 0;
   return [{
     path: 'navigation.headingTrue',
-    value: heading === '' || heading === '0.0000'
+    value: noFix || isNaN(heading)
       ? null
-      : ((parseFloat(heading) + 90) % 360) * Math.PI / 180
+      : ((heading + 90) % 360) * Math.PI / 180
   }
   ] as PathValue[]
 }
@@ -392,8 +406,13 @@ const CONVERTERS = {
     { index: 2, path: 'sensors.rtk.baselineLength', convert: (v: string) => parseFloat(v) },
     {
       index: 3, path: 'navigation.headingTrue', convert: (v: string) => {
-        if (v === '0.0000') return null;
-        return ((parseFloat(v) + 90) % 360) * Math.PI / 180
+        const heading = parseFloat(v);
+        // Math only; heading validity is gated in uniheadingAParser using the
+        // authoritative sol-stat + pos-type fields (see SOL_STATUS_VALID /
+        // POSITION_TYPE_NO_SOLUTION below). Guard NaN so a malformed field
+        // can't slip through as 90deg via the +90 offset.
+        if (isNaN(heading)) return null;
+        return ((heading + 90) % 360) * Math.PI / 180
       }
     },
     // { index: 3, path: 'navigation.headingTruedeg', convert: (v: string) => parseFloat(v) + 90 },
@@ -410,7 +429,18 @@ const CONVERTERS = {
   ]
 }
 const POSITION_TYPE_INDEX = CONVERTERS.UNIHEADINGA.findIndex(c => c.path === 'sensors.rtk.positionType');
+const SOLUTION_STATUS_INDEX = CONVERTERS.UNIHEADINGA.findIndex(c => c.path === 'sensors.rtk.solutionStatus');
 const HEADING_TRUE_INDEX = CONVERTERS.UNIHEADINGA.findIndex(c => c.path === 'navigation.headingTrue');
+
+// UM982 reference manual: a heading is only valid when sol-stat and pos-type
+// are considered together (Table 0-5 Solution Status, Table 0-4 Position Type).
+// Valid solution status for a computed heading.
+const SOL_STATUS_VALID = 'SOL_COMPUTED';
+// Position type that means "no solution" (Table 0-4). Any other pos-type with a
+// computed solution carries a real heading, so we reject by this blacklist
+// rather than an exact whitelist (firmware can report NARROW_INT, NARROW_FLOAT,
+// WIDE_INT, etc. — all valid headings).
+const POSITION_TYPE_NO_SOLUTION = 'NONE';
 
 // modified UNIHEADINGA parser to extract entire message header
 // (i.e. everything up to first semicolon)
@@ -438,8 +468,14 @@ const uniheadingAParser = (parts: string[], sentence: string) => {
 
   debug('UNIHEADINGA parsed values: %j', parsed);
 
-  if (parsed[POSITION_TYPE_INDEX].value === 'NONE') {
-    debug('Position type is NONE, setting heading to null');
+  // Per the manual's guidance, judge validity from sol-stat + pos-type together:
+  // accept the heading when the solution is computed and the position type is
+  // not "no solution". Anything else (NONE / INSUFFICIENT_OBS / NO_CONVERGENCE
+  // / COV_TRACE) -> null.
+  const solStatus = parsed[SOLUTION_STATUS_INDEX].value;
+  const posType = parsed[POSITION_TYPE_INDEX].value;
+  if (solStatus !== SOL_STATUS_VALID || posType === POSITION_TYPE_NO_SOLUTION) {
+    debug('No valid heading solution (solStatus=%s, posType=%s), setting heading to null', solStatus, posType);
     parsed[HEADING_TRUE_INDEX].value = null;
   }
 
