@@ -8,11 +8,18 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # This job only builds and tests; it never writes back to the repository.
+    permissions:
+      contents: read
     strategy:
       matrix:
         node-version: [20.x, 22.x]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes, so don't leave a token in .git/config where a
+          # later step could reach it.
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
