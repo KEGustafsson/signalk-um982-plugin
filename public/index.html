@@ -1091,7 +1091,12 @@
       // `args` is passed through verbatim. It used to be coerced with
       // Number.parseFloat, which silently truncated "200 5" to 200 and dropped
       // the baseline tolerance the user had typed.
-      async function sendSentenceConfiguration(sentence, args, summaryText) {
+      async function sendSentenceConfiguration(
+        sentence,
+        args,
+        summaryText,
+        label
+      ) {
         let url = `${pluginBaseUrl}/send/${encodeURIComponent(sentence)}`;
 
         if (args !== null && args !== undefined && String(args) !== "") {
@@ -1114,13 +1119,16 @@
           }
 
           showSettingsFeedback(
-            `Sentence ${sentence} ${summaryText || "sent"}.`
+            `Sentence ${label || sentence} ${summaryText || "sent"}.`
           );
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
           console.error("Failed to send configuration", error);
-          showSettingsFeedback(`Failed to send ${sentence}: ${message}`, true);
+          showSettingsFeedback(
+            `Failed to send ${label || sentence}: ${message}`,
+            true
+          );
         }
       }
 
@@ -1146,7 +1154,7 @@
             if (value === "") {
               // A bare sentence name is a one-shot query on Unicore firmware,
               // not a stop. UNLOG is what actually disables the log.
-              sendSentenceConfiguration("UNLOG", sentence, "disabled");
+              sendSentenceConfiguration("UNLOG", sentence, "disabled", sentence);
               return;
             }
             const intervalValue = Number.parseFloat(value);
@@ -2704,6 +2712,17 @@
 
       // A backgrounded or closed tab kept a 2Hz stream and two intervals
       // running, and never flushed pending history.
+      window.addEventListener("pageshow", (event) => {
+        if (!event.persisted) return;
+        // Restored from the back/forward cache: everything below was torn down
+        // on pagehide, so bring it back rather than leaving a dead page.
+        shouldReconnect = true;
+        reconnectDelay = 1000;
+        startCleanupTimer();
+        saveTimer = setInterval(saveHistoryPeriodically, 30000);
+        connectWebSocket();
+      });
+
       window.addEventListener("pagehide", () => {
         shouldReconnect = false;
         if (reconnectTimer) clearTimeout(reconnectTimer);
