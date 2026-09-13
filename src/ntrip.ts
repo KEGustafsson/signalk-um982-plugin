@@ -1,7 +1,6 @@
-import { RtcmTransport } from '@gnss/rtcm';
+import { RtcmMessage, RtcmTransport } from '@gnss/rtcm';
 import { Position } from '@signalk/server-api';
-
-const { NtripClient } = require('ntrip-client');
+import { NtripClient } from 'ntrip-client';
 
 export interface NtripOptions {
   host: string;
@@ -11,7 +10,19 @@ export interface NtripOptions {
   password: string;
   xyz: [number, number, number];
   interval: number;
+  timeout?: number;
+  reconnectInterval?: number;
 }
+
+// ntrip-client turns socket inactivity into a hard teardown + reconnect, and its
+// own default is 15s. A base that only emits 1005 every 30s, or that idles
+// overnight, would therefore reconnect forever. Default to something that
+// tolerates a quiet mountpoint.
+const DEFAULT_SOCKET_TIMEOUT = 60000;
+const DEFAULT_RECONNECT_INTERVAL = 5000;
+
+// RTCM3 frames always start with this preamble (RTCM 10403.x, DF002).
+const RTCM3_PREAMBLE = 0xd3;
 
 export const NtripOptionsSchema = {
   type: "object",
@@ -45,12 +56,14 @@ export const NtripOptionsSchema = {
     latitude: {
       type: "number",
       title: "Latitude",
+      description: "Approximate receiver latitude, sent to the caster in a GGA sentence (required for VRS/NEAR mountpoints)",
       minimum: -90,
       maximum: 90
     },
     longitude: {
       type: "number",
       title: "Longitude",
+      description: "Approximate receiver longitude, sent to the caster in a GGA sentence (required for VRS/NEAR mountpoints)",
       minimum: -180,
       maximum: 180
     },
@@ -59,6 +72,19 @@ export const NtripOptionsSchema = {
       title: "Update Interval in milliseconds",
       minimum: 1000,
       default: 2000
+    },
+    timeout: {
+      type: "number",
+      title: "Socket Timeout in milliseconds",
+      description: "Drop and reconnect the caster connection after this much silence",
+      minimum: 1000,
+      default: DEFAULT_SOCKET_TIMEOUT
+    },
+    reconnectInterval: {
+      type: "number",
+      title: "Reconnect Interval in milliseconds",
+      minimum: 1000,
+      default: DEFAULT_RECONNECT_INTERVAL
     }
   }
 } as const;
@@ -73,22 +99,58 @@ export type NtripConfig = {
 }
 
 export const startRTCM = (params: NtripConfig): (() => void) => {
-  const { options, onData, onStationData, onClose, onError, debug = () => {} } = params;
+  const { options, onData, onStationData, onClose, onError, debug = () => { } } = params;
+
+  const xyz = latLonToECEF(options.latitude, options.longitude, 0);
+  if (!xyz.every(Number.isFinite)) {
+    throw new Error(`Invalid NTRIP reference position: ${options.latitude}, ${options.longitude}`);
+  }
+
   const options_: NtripOptions = {
-    xyz: latLonToECEF(options.latitude, options.longitude, 0),
-    ...options
+    timeout: DEFAULT_SOCKET_TIMEOUT,
+    reconnectInterval: DEFAULT_RECONNECT_INTERVAL,
+    ...options,
+    // Spread first so the computed ECEF always wins.
+    //
+    // ntrip-client only sends the periodic GGA when *all three* ECEF components
+    // are non-zero (lib/utils.js checkXyz), and a component is exactly zero for
+    // any receiver on the Greenwich meridian or on the equator. Nudging by a
+    // micrometre keeps that check happy without moving the reported position.
+    xyz: xyz.map(v => (v === 0 ? 1e-6 : v)) as [number, number, number]
   };
+
+  debug('Starting NTRIP client for %s:%s/%s, GGA reference %j',
+    options_.host, options_.port, options_.mountpoint, options_.xyz);
 
   const client = new NtripClient(options_);
 
   client.on('data', (data: Buffer) => {
-    onData(data);
-    try {
-      const [message, length] = RtcmTransport.decode(data);
-      logReferenceStationInfo(message, data, onStationData);
-    } catch (err: any) {
-      // console.warn('RTCM parse warning:', err.message);
+    // The caster's response header ("ICY 200 OK", "HTTP/1.1 401 ...") arrives as
+    // an ordinary data event. Forwarding it would write ASCII junk into the
+    // UM982's command port, so only pass verified RTCM3 frames through.
+    if (data.length === 0 || data[0] !== RTCM3_PREAMBLE) {
+      debug('Ignoring non-RTCM payload from caster (%d bytes): %s',
+        data.length, data.toString('latin1').slice(0, 80));
+      // ntrip-client only sets isReady on the legacy "ICY 200 OK" reply, so an
+      // NTRIP 2.0 caster answering "HTTP/1.1 200 OK" would never get a GGA.
+      // Treat any accepted response header as ready.
+      if (!client.isReady && data.toString('latin1').includes('200 OK')) {
+        debug('Caster accepted the connection, enabling GGA transmission');
+        client.isReady = true;
+      }
+      return;
     }
+
+    onData(data);
+
+    let message: RtcmMessage;
+    try {
+      [message] = RtcmTransport.decode(data);
+    } catch (err: any) {
+      debug('RTCM decode failed (%d bytes): %s', data.length, err?.message ?? err);
+      return;
+    }
+    logReferenceStationInfo(message, onStationData, debug);
   });
 
   client.on('close', () => {
@@ -106,36 +168,30 @@ export const startRTCM = (params: NtripConfig): (() => void) => {
   // Return cleanup function
   return () => {
     debug('Closing NTRIP client...');
-    if (client && typeof client.close === 'function') {
-      client.close();
-    } else if (client && typeof client.destroy === 'function') {
-      client.destroy();
-    }
+    client.close();
   };
 }
 
-export function latLonToECEF(lat: number, lon: number, alt: number = 0): [number, number, number] {
-  const a = 6378137.0; // WGS84 semi-major axis
-  const e2 = 0.00669437999014; // WGS84 eccentricity squared
+// WGS84 defining parameters (NIMA TR8350.2).
+const WGS84_A = 6378137.0; // Semi-major axis (meters)
+const WGS84_F = 1 / 298.257223563; // Flattening
+const WGS84_E2 = 2 * WGS84_F - WGS84_F * WGS84_F; // First eccentricity squared
+const WGS84_B = WGS84_A * (1 - WGS84_F); // Semi-minor axis (meters)
 
+export function latLonToECEF(lat: number, lon: number, alt: number = 0): [number, number, number] {
   const latRad = lat * Math.PI / 180;
   const lonRad = lon * Math.PI / 180;
 
-  const N = a / Math.sqrt(1 - e2 * Math.sin(latRad) * Math.sin(latRad));
+  const N = WGS84_A / Math.sqrt(1 - WGS84_E2 * Math.sin(latRad) * Math.sin(latRad));
 
   const x = (N + alt) * Math.cos(latRad) * Math.cos(lonRad);
   const y = (N + alt) * Math.cos(latRad) * Math.sin(lonRad);
-  const z = (N * (1 - e2) + alt) * Math.sin(latRad);
+  const z = (N * (1 - WGS84_E2) + alt) * Math.sin(latRad);
 
   return [x, y, z];
 }
 
 export function ecefToLatLon(x: number, y: number, z: number): { latitude: number; longitude: number; height: number } {
-  // WGS84 constants
-  const a = 6378137.0; // Semi-major axis (meters)
-  const f = 1 / 298.257223563; // Flattening
-  const e2 = 2 * f - f * f; // First eccentricity squared
-
   // RTCM 1005/1006 ARP ECEF coordinates have a resolution of 0.0001 m (0.1 mm)
   // and are returned by the decoder as raw signed integers, so divide by 10000 to get meters.
   const X = x / 10000;
@@ -145,22 +201,36 @@ export function ecefToLatLon(x: number, y: number, z: number): { latitude: numbe
   // Calculate longitude
   const lon = Math.atan2(Y, X);
 
-  // Calculate latitude iteratively
   const p = Math.sqrt(X * X + Y * Y);
-  let lat = Math.atan2(Z, p * (1 - e2));
-  let N, h;
+
+  // On (or very near) the polar axis the iteration below divides by cos(lat) and
+  // by N + h, both of which collapse to zero and poison every later value with
+  // NaN. A base station reporting a zeroed ARP - common during survey-in - lands
+  // exactly here, so answer the degenerate case directly.
+  if (p < 1e-9) {
+    return {
+      latitude: Z >= 0 ? 90 : -90,
+      longitude: 0,
+      height: Math.abs(Z) - WGS84_B
+    };
+  }
+
+  // Calculate latitude iteratively
+  let lat = Math.atan2(Z, p * (1 - WGS84_E2));
+  let N: number;
+  let h: number;
 
   // Iterate to improve accuracy
   for (let i = 0; i < 10; i++) {
     const sinLat = Math.sin(lat);
-    N = a / Math.sqrt(1 - e2 * sinLat * sinLat);
+    N = WGS84_A / Math.sqrt(1 - WGS84_E2 * sinLat * sinLat);
     h = p / Math.cos(lat) - N;
-    lat = Math.atan2(Z, p * (1 - e2 * N / (N + h)));
+    lat = Math.atan2(Z, p * (1 - WGS84_E2 * N / (N + h)));
   }
 
   // Final height calculation
   const sinLat = Math.sin(lat);
-  N = a / Math.sqrt(1 - e2 * sinLat * sinLat);
+  N = WGS84_A / Math.sqrt(1 - WGS84_E2 * sinLat * sinLat);
   h = p / Math.cos(lat) - N;
 
   return {
@@ -170,7 +240,15 @@ export function ecefToLatLon(x: number, y: number, z: number): { latitude: numbe
   };
 }
 
-function logReferenceStationInfo(message: any, data: Buffer, onStationData?: (delta: any) => void) {
+// Reference station heights outside this band mean we decoded something that is
+// not an ARP, so the delta is dropped rather than published as a bogus position.
+const MAX_PLAUSIBLE_STATION_HEIGHT = 20000;
+
+function logReferenceStationInfo(
+  message: any,
+  onStationData?: (delta: any) => void,
+  debug: (fmt: string, ...args: any[]) => void = () => { }
+) {
   // Check if this is a reference station message with ECEF coordinates
   if (message && typeof message === 'object' &&
     'referenceStationId' in message &&
@@ -178,7 +256,14 @@ function logReferenceStationInfo(message: any, data: Buffer, onStationData?: (de
     'arpEcefY' in message &&
     'arpEcefZ' in message) {
 
-    const coords = ecefToLatLon(message.arpEcefX, message.arpEcefY, message.arpEcefZ);
+    const { height, ...latLon } = ecefToLatLon(message.arpEcefX, message.arpEcefY, message.arpEcefZ);
+
+    if (!Number.isFinite(latLon.latitude) || !Number.isFinite(latLon.longitude) ||
+      !Number.isFinite(height) || Math.abs(height) > MAX_PLAUSIBLE_STATION_HEIGHT) {
+      debug('Ignoring implausible reference station position for %s: %j',
+        message.referenceStationId, { ...latLon, height });
+      return;
+    }
 
     if (onStationData) {
       const delta = {
@@ -191,7 +276,8 @@ function logReferenceStationInfo(message: any, data: Buffer, onStationData?: (de
             },
             {
               path: 'navigation.position',
-              value: coords
+              // Signal K positions use `altitude`, not `height`.
+              value: { ...latLon, altitude: height }
             }
           ]
         }]
@@ -200,4 +286,3 @@ function logReferenceStationInfo(message: any, data: Buffer, onStationData?: (de
     }
   }
 }
-

@@ -1,11 +1,24 @@
 {
   "name": "@tkurki/um982",
   "version": "0.0.1",
-  "description": "Signal K plugin for Unicore UM982 GNSS receiver",
+  "description": "Signal K plugin and webapp for Unicore UM982 RTK GNSS receivers, with NTRIP client",
   "main": "dist/plugin.js",
-  "scripts": {
-    "build": "tsc"
+  "signalk": {
+    "displayName": "UM982 GNSS"
   },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run clean && npm run build",
+    "test": "npm run build && node --test \"test/*.test.js\""
+  },
+  "files": [
+    "dist",
+    "public",
+    "README.md",
+    "LICENSE"
+  ],
   "keywords": [
     "nmea",
     "unicore",
@@ -15,12 +28,22 @@
     "signalk-node-server-plugin",
     "signalk-webapp"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KEGustafsson/signalk-um982-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KEGustafsson/signalk-um982-plugin/issues"
+  },
+  "homepage": "https://github.com/KEGustafsson/signalk-um982-plugin#readme",
   "author": "",
   "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
   "devDependencies": {
     "@signalk/server-api": "^2.8.0",
-    "@types/node": "^20.0.0",
-    "ts-node": "^10.9.0",
+    "@types/node": "^22.0.0",
     "typescript": "^5.0.0"
   },
   "dependencies": {

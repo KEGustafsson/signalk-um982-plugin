@@ -39,7 +39,10 @@ declare module 'ntrip-client' {
   // Note: MountpointInfo and ConnectionStats are not part of the actual API
   // These would be handled by the 'data' event when mountpoint is empty string
 
-  export class NTripClient extends EventEmitter {
+  // The runtime module exports exactly one name, `NtripClient`
+  // (ntrip-client/lib/client.js: `module.exports = { NtripClient }`).
+
+  export class NtripClient extends EventEmitter {
     /** NTRIP caster host/IP address */
     host: string;
 
@@ -108,16 +111,17 @@ declare module 'ntrip-client' {
     /** Send data to the NTRIP caster */
     write(data: string | Buffer): void;
 
-    // EventEmitter events - based on actual implementation
+    // EventEmitter events - based on actual implementation. These are additive
+    // overloads: the inherited EventEmitter signature stays available so
+    // listeners for other events still typecheck.
     on(event: 'data', listener: (data: Buffer) => void): this;
     on(event: 'error', listener: (error: string | Error) => void): this;
     on(event: 'close', listener: () => void): this;
+    on(event: string | symbol, listener: (...args: any[]) => void): this;
 
     emit(event: 'data', data: Buffer): boolean;
     emit(event: 'error', error: string | Error): boolean;
     emit(event: 'close'): boolean;
+    emit(event: string | symbol, ...args: any[]): boolean;
   }
-
-  // Main export matches actual module structure
-  export { NTripClient as NtripClient };
 }
