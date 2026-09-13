@@ -11,7 +11,7 @@
     "clean": "rm -rf dist",
     "prepare": "npm run build",
     "prepublishOnly": "npm run clean && npm run build",
-    "test": "npm run build && node --test \"test/*.test.js\""
+    "test": "npm run build && node --test"
   },
   "files": [
     "dist",
