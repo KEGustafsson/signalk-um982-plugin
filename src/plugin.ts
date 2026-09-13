@@ -409,7 +409,17 @@ $command,GNRMC 1,response: OK*1A
 
 */
 
-// $CONFIG,<key>,CONFIG <key> <value...>*<checksum>
+/**
+ * Parse a $CONFIG response into the accumulated receiver configuration map.
+ *
+ * Shape: `$CONFIG,<key>,CONFIG <key> <value...>*<checksum>`.
+ *
+ * @param parts The raw sentence split on commas; only the key is taken here.
+ * @param sentence The sentence with its checksum already removed.
+ * @param ctx Debug logger and the config map accessor.
+ * @returns A single `sensors.rtk.um982` value holding a copy of the map, or an
+ *   empty array if the line is malformed.
+ */
 const configParser = (parts: string[], sentence: string, ctx: ParserContext) => {
   if (parts.length < 3 || !parts[1]) {
     ctx.debug('Ignoring malformed $CONFIG sentence: %j', sentence);
@@ -430,6 +440,14 @@ const configParser = (parts: string[], sentence: string, ctx: ParserContext) => 
   }] as PathValue[];
 }
 
+/**
+ * Parse a #MODE sentence into the receiver's current mode.
+ *
+ * @param _parts Unused; the mode is taken from the data section of `sentence`.
+ * @param sentence The sentence with its checksum already removed.
+ * @returns A single `navigation.gnss.um982.mode` value, or an empty array if
+ *   there is no data section.
+ */
 const modeParser = (_parts: string[], sentence: string) => {
   // #MODE,<header fields>;MODE <mode...>
   const dataSection = sentence.split(';')[1];
@@ -468,6 +486,15 @@ export const headingToRadians = (headingDeg: number, offsetDeg: number): number 
 // solution and the heading must be reported as null (instead of flickering to
 // the offset value). parts[5] may be missing on older firmware, in which case
 // we fall back to treating a numeric-zero heading as no-fix.
+/**
+ * Parse a $--HPR sentence into a heading.
+ *
+ * @param parts The sentence split on commas.
+ * @param _sentence Unused.
+ * @param ctx Debug logger and heading offset.
+ * @returns A single `navigation.headingTrue` value, null when the quality flag
+ *   reports no fix.
+ */
 const hprParser = (parts: string[], _sentence: string, ctx: ParserContext) => {
   const qf = parts[5];
   const heading = parseFloat(parts[2]);
@@ -607,9 +634,18 @@ export const parseBestSat = (sentence: string) => {
   return satellites;
 };
 
-// BESTSATA is decoded for diagnostics only. Publishing it as
-// navigation.gnss.satellitesUsed was removed deliberately in 9c122e2, so the
-// result goes to the debug log rather than into the Signal K model.
+/**
+ * Decode #BESTSATA for the debug log only.
+ *
+ * Publishing this as navigation.gnss.satellitesUsed was removed deliberately
+ * in 9c122e2, so the decoded satellites go to the debug log rather than into
+ * the Signal K model.
+ *
+ * @param _parts Unused.
+ * @param sentence The sentence with its checksum already removed.
+ * @param ctx Debug logger.
+ * @returns Always an empty array.
+ */
 const bestSatParser = (_parts: string[], sentence: string, ctx: ParserContext) => {
   const satellites = parseBestSat(sentence);
   if (satellites.length) {
@@ -727,9 +763,13 @@ export const uniheadingAParser = (_parts: string[], sentence: string, ctx: Parse
 
   if (!validSolution) {
     ctx.debug('No valid heading solution (solStatus=%s, posType=%s), setting heading to null', solStatus, posType);
+    // A sentence truncated after the solution status leaves posType
+    // undefined, which serialises as a delta entry with no `value` key at all.
     return [
       { path: 'sensors.rtk.solutionStatus', value: solStatus },
-      { path: 'sensors.rtk.positionType', value: posType },
+      ...(posType === undefined
+        ? []
+        : [{ path: 'sensors.rtk.positionType', value: posType }]),
       { path: 'navigation.headingTrue', value: null }
     ] as PathValue[];
   }

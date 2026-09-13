@@ -105,6 +105,21 @@ test('UNIHEADINGA truncated mid-sentence never publishes NaN', () => {
   }
 });
 
+test('UNIHEADINGA truncated before the position type omits it entirely', () => {
+  // Every published entry must carry a value: `{value: undefined}` serialises
+  // to a delta entry with no value key at all.
+  const { ctx: c } = ctx();
+  const values = uniheadingAParser([], '#UNIHEADINGA,93,GPS,FINE,2385,326592000,0,0,18,10;INSUFFICIENT_OBS', c);
+
+  assert.ok(!values.some(v => v.path === 'sensors.rtk.positionType'));
+  assert.strictEqual(valueOf(values, 'sensors.rtk.solutionStatus'), 'INSUFFICIENT_OBS');
+  assert.strictEqual(valueOf(values, 'navigation.headingTrue'), null);
+  for (const v of values) {
+    assert.ok('value' in v, `${v.path} has no value key`);
+    assert.notStrictEqual(v.value, undefined, `${v.path} is undefined`);
+  }
+});
+
 test('UNIHEADINGA with no data section yields nothing', () => {
   const { ctx: c } = ctx();
   assert.deepStrictEqual(uniheadingAParser([], '#UNIHEADINGA,93,GPS,FINE', c), []);

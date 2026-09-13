@@ -279,6 +279,17 @@ export function ecefToLatLon(x: number, y: number, z: number): { latitude: numbe
 // not an ARP, so the delta is dropped rather than published as a bogus position.
 const MAX_PLAUSIBLE_STATION_HEIGHT = 20000;
 
+/**
+ * Publish a decoded RTCM 1005/1006 reference station as a Signal K delta.
+ *
+ * Messages without antenna reference point coordinates are ignored, as are
+ * positions that do not convert to a plausible location - a base station
+ * transmitting a zeroed ARP must not surface as a real position.
+ *
+ * @param message A decoded RTCM message.
+ * @param onStationData Delta sink; nothing is published without it.
+ * @param debug Debug logger.
+ */
 function logReferenceStationInfo(
   message: any,
   onStationData?: (delta: any) => void,
