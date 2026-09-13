@@ -98,6 +98,19 @@ export type NtripConfig = {
   debug?: (fmt: string, ...args: any[]) => void
 }
 
+/**
+ * Connect to an NTRIP caster and stream RTCM corrections to the receiver.
+ *
+ * Only verified RTCM3 frames reach `onData`; the caster's response header
+ * arrives as an ordinary data event and would otherwise be written into the
+ * UM982's command port.
+ *
+ * @param params Caster options plus the data, error, close and station-data
+ *   callbacks, and an optional debug logger.
+ * @returns A cleanup function that closes the client.
+ * @throws If the configured latitude/longitude do not yield a finite ECEF
+ *   position.
+ */
 export const startRTCM = (params: NtripConfig): (() => void) => {
   const { options, onData, onStationData, onClose, onError, debug = () => { } } = params;
 
@@ -178,6 +191,14 @@ const WGS84_F = 1 / 298.257223563; // Flattening
 const WGS84_E2 = 2 * WGS84_F - WGS84_F * WGS84_F; // First eccentricity squared
 const WGS84_B = WGS84_A * (1 - WGS84_F); // Semi-minor axis (meters)
 
+/**
+ * Convert geodetic coordinates to earth-centred, earth-fixed metres (WGS84).
+ *
+ * @param lat Latitude in degrees.
+ * @param lon Longitude in degrees.
+ * @param alt Height above the ellipsoid in metres.
+ * @returns `[x, y, z]` in metres.
+ */
 export function latLonToECEF(lat: number, lon: number, alt: number = 0): [number, number, number] {
   const latRad = lat * Math.PI / 180;
   const lonRad = lon * Math.PI / 180;
@@ -191,6 +212,20 @@ export function latLonToECEF(lat: number, lon: number, alt: number = 0): [number
   return [x, y, z];
 }
 
+/**
+ * Convert an RTCM 1005/1006 antenna reference point to geodetic coordinates.
+ *
+ * Inputs are the decoder's raw signed integers in 0.1 mm units, not metres.
+ * The polar axis is handled explicitly: the iteration below divides by
+ * `cos(lat)` and by `N + h`, which both collapse to zero there and would
+ * otherwise return NaN for a base station transmitting a zeroed ARP.
+ *
+ * @param x Raw ECEF X in 0.1 mm units.
+ * @param y Raw ECEF Y in 0.1 mm units.
+ * @param z Raw ECEF Z in 0.1 mm units.
+ * @returns Latitude and longitude in degrees, height above the ellipsoid in
+ *   metres.
+ */
 export function ecefToLatLon(x: number, y: number, z: number): { latitude: number; longitude: number; height: number } {
   // RTCM 1005/1006 ARP ECEF coordinates have a resolution of 0.0001 m (0.1 mm)
   // and are returned by the decoder as raw signed integers, so divide by 10000 to get meters.

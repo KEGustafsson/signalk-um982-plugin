@@ -317,6 +317,18 @@ type ParserContext = {
   handleMessage: (delta: any) => void
 }
 
+/**
+ * Build the sentence parsers for one plugin run.
+ *
+ * The returned parsers never throw: they run inside the server's connection
+ * pipeline, so a malformed sentence is logged and dropped instead of
+ * propagating into the server's read path.
+ *
+ * @param ctx Debug logger, heading offset, receiver config map accessor and
+ *   the delta sink.
+ * @returns `sentence` for raw NMEA0183 input and `multiplexed` for
+ *   `<timestamp>;<discriminator>;<sentence>` lines.
+ */
 export const createSentenceParser = (ctx: ParserContext) => {
   const sentence = (completeSentence: string) => parseNmeaSentence(completeSentence, ctx);
   return {
@@ -430,6 +442,13 @@ const modeParser = (_parts: string[], sentence: string) => {
   } as PathValue];
 }
 
+/**
+ * Apply the antenna offset to a receiver heading and convert it to radians.
+ *
+ * @param headingDeg Heading reported by the receiver, in degrees.
+ * @param offsetDeg Angle from the bow to the master->slave antenna baseline.
+ * @returns The heading in `[0, 2pi)`, or `null` if `headingDeg` is not finite.
+ */
 export const headingToRadians = (headingDeg: number, offsetDeg: number): number | null => {
   if (!Number.isFinite(headingDeg)) {
     return null;
@@ -463,7 +482,17 @@ const hprParser = (parts: string[], _sentence: string, ctx: ParserContext) => {
   ] as PathValue[]
 }
 
-// Decode BESTSATA signal mask field
+/**
+ * Decode a BESTSATA signal mask into the signal names it represents.
+ *
+ * Bit assignments differ per constellation, and firmware abbreviates some
+ * names (GLO/GAL/BDS), so both spellings are accepted.
+ *
+ * @param maskHex The mask field, hexadecimal.
+ * @param gnssSystem Constellation name from the same satellite record.
+ * @returns Signal names, or a single `0x...` entry for an unknown
+ *   constellation or an unparseable mask.
+ */
 export const decodeBestSatMask = (maskHex: string, gnssSystem: string) => {
   const mask = parseInt(maskHex, 16);
   const signals: string[] = [];
@@ -534,6 +563,14 @@ export const decodeBestSatMask = (maskHex: string, gnssSystem: string) => {
   return signals;
 };
 
+/**
+ * Decode the satellite records carried by a #BESTSATA sentence.
+ *
+ * @param sentence The sentence with its checksum already removed.
+ * @returns One entry per satellite; empty if there is no data section. A
+ *   record count larger than the data present is truncated rather than
+ *   producing undefined entries.
+ */
 export const parseBestSat = (sentence: string) => {
   // BESTSATA message format:
   // #BESTSATA,90,GPS,FINE,2389,362704000,0,0,18,24;18,GPS,1,GOOD,00000017,GPS,2,GOOD,00000011...
@@ -647,6 +684,19 @@ const POSITION_TYPE_NO_SOLUTION = 'NONE';
 // modified UNIHEADINGA parser to extract entire message header
 // (i.e. everything up to first semicolon)
 // which lets field indexes match UM982 documentation
+/**
+ * Parse a #UNIHEADINGA sentence into Signal K deltas.
+ *
+ * Validity is judged from sol-stat and pos-type together; when the receiver
+ * reports no solution only the status fields and a null heading are returned,
+ * rather than a baseline and satellite counts from a sentence it has just
+ * declared invalid.
+ *
+ * @param _parts Unused; the data section is taken from `sentence`.
+ * @param sentence The sentence with its checksum already removed.
+ * @param ctx Debug logger and heading offset.
+ * @returns Path/value pairs, or an empty array if there is no data section.
+ */
 export const uniheadingAParser = (_parts: string[], sentence: string, ctx: ParserContext) => {
   ctx.debug('UNIHEADINGA received: %s', sentence);
 
@@ -698,10 +748,18 @@ export const uniheadingAParser = (_parts: string[], sentence: string, ctx: Parse
   return parsed;
 }
 
-// Returns a human-readable description of the first configuration problem
-// found, or undefined when the configuration is usable. The previous boolean
-// version left the user with a bare "Invalid configuration" and no clue which
-// field was at fault.
+/**
+ * Check a saved plugin configuration and describe the first problem found.
+ *
+ * Returning a description rather than a boolean is what lets the plugin tell
+ * the user which field is at fault instead of a bare "Invalid configuration".
+ * The NTRIP password is redacted before the configuration is logged.
+ *
+ * @param obj The configuration object as saved by the admin UI.
+ * @param debug Debug logger.
+ * @returns A human-readable problem description, or `undefined` when the
+ *   configuration is usable.
+ */
 export function describeConfigurationProblem(obj: any, debug: Debug = noopDebug): string | undefined {
   // Never log the whole config object: it carries the NTRIP password.
   const { password, ...loggable } = obj ?? {};
