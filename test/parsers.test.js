@@ -327,6 +327,23 @@ test('configuration validation explains what is wrong', () => {
   assert.strictEqual(describeConfigurationProblem({ ...ntrip, latitude: 0 }), undefined);
   assert.strictEqual(describeConfigurationProblem({ ...ntrip, longitude: 0 }), undefined);
   assert.match(describeConfigurationProblem({ ...ntrip, latitude: 91 }), /latitude/);
+
+  // ntrip-client falls back to its own defaults only for a FALSY value, so a
+  // negative reconnectInterval survives and then trips the `<= 0` guard in
+  // _reconnect(): corrections stop for good on the first dropped connection.
+  // A truthy non-number reaches setTimeout() and the sleep timer intact.
+  for (const key of ['timeout', 'reconnectInterval']) {
+    assert.strictEqual(describeConfigurationProblem({ ...ntrip, [key]: undefined }), undefined);
+    assert.strictEqual(describeConfigurationProblem({ ...ntrip, [key]: 1000 }), undefined);
+    assert.strictEqual(describeConfigurationProblem({ ...ntrip, [key]: 60000 }), undefined);
+    for (const bad of [-1, 0, 999, 'abc', NaN, Infinity, null, {}]) {
+      assert.match(
+        describeConfigurationProblem({ ...ntrip, [key]: bad }),
+        new RegExp(`"${key}"`),
+        `${key}=${JSON.stringify(bad)} should be rejected`
+      );
+    }
+  }
 });
 
 test('configuration validation never logs the NTRIP password', () => {

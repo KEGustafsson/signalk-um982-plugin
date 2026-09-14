@@ -45,6 +45,9 @@ const ALLOWED_COMMANDS = new Set([
 // second command into a single request.
 const COMMAND_PATTERN = /^[A-Za-z0-9 .,\-]{1,120}$/;
 
+// Matches the `minimum` both timing fields declare in NtripOptionsSchema.
+const MIN_NTRIP_TIMING_MS = 1000;
+
 const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
   const debug: Debug = (app as any).debug.bind(app)
 
@@ -895,6 +898,23 @@ export function describeConfigurationProblem(obj: any, debug: Debug = noopDebug)
     for (const key of ['port', 'interval', 'latitude', 'longitude'] as const) {
       if (typeof obj[key] !== 'number' || !Number.isFinite(obj[key])) {
         return `NTRIP is enabled but "${key}" is not set (untick "NTRIP Enabled" to use the receiver without corrections)`;
+      }
+    }
+
+    // Both are optional, but ntrip-client only falls back to its own defaults
+    // for a falsy value: `options.reconnectInterval || RECONNECT_INTERVAL`. A
+    // negative interval survives that and then trips the `<= 0` guard in
+    // _reconnect(), which returns without reconnecting - corrections stop for
+    // good on the first dropped connection, silently. A truthy non-number
+    // reaches setTimeout() and the sleep timer intact. The admin form enforces
+    // the schema's minimum, but a hand-edited settings file does not, and this
+    // is the gate that decides whether the plugin runs at all.
+    for (const key of ['timeout', 'reconnectInterval'] as const) {
+      if (obj[key] === undefined) {
+        continue;
+      }
+      if (typeof obj[key] !== 'number' || !Number.isFinite(obj[key]) || obj[key] < MIN_NTRIP_TIMING_MS) {
+        return `NTRIP "${key}" must be a number of at least ${MIN_NTRIP_TIMING_MS} milliseconds`;
       }
     }
 
