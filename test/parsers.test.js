@@ -284,6 +284,67 @@ test('configuration validation never logs the NTRIP password', () => {
   assert.ok(!logged.join(' ').includes('hunter2'));
 });
 
+test('UNIHEADINGA always publishes a heading, however truncated the sentence', () => {
+  // Without this the last good heading stays live in the model after a
+  // truncated sentence - the stale-heading case this parser exists to prevent.
+  const header = '#UNIHEADINGA,93,GPS,FINE,2385,326592000,0,0,18,10;';
+  const bodies = [
+    'SOL_COMPUTED',
+    'SOL_COMPUTED,',
+    'SOL_COMPUTED,   ',
+    'SOL_COMPUTED,NONE',
+    'SOL_COMPUTED,L1_INT',
+    'SOL_COMPUTED,L1_INT,2.7889',
+    'INSUFFICIENT_OBS',
+    'INSUFFICIENT_OBS,NONE,0.0,0.0'
+  ];
+
+  for (const body of bodies) {
+    const { ctx: c } = ctx();
+    const values = uniheadingAParser([], header + body, c);
+    const heading = values.find(v => v.path === 'navigation.headingTrue');
+    assert.notStrictEqual(heading, undefined, `no heading published for "${body}"`);
+    assert.strictEqual(heading.value, null, `heading should be null for "${body}"`);
+    for (const v of values) {
+      assert.ok('value' in v, `${v.path} has no value key for "${body}"`);
+      assert.notStrictEqual(v.value, undefined, `${v.path} undefined for "${body}"`);
+      assert.ok(!Number.isNaN(v.value), `${v.path} is NaN for "${body}"`);
+    }
+  }
+});
+
+test('every parser survives progressive truncation of a real sentence', () => {
+  // Systematic sweep rather than hand-picked cases: truncate each sentence at
+  // every character boundary and assert nothing throws and nothing publishes
+  // an undefined or NaN value.
+  const sentences = [
+    UNIHEADINGA_FIX,
+    '#MODE,97,GPS,FINE,2389,362704000,0,0,18;MODE ROVER UAV*cf',
+    '#BESTSATA,90,GPS,FINE,2389,362704000,0,0,18,24;2,GPS,1,GOOD,00000017,GLO,2,GOOD,00000011*aa',
+    '$GNHPR,123519.00,270.00,1.00,0.00,4,20,0.0,0*1a',
+    '$CONFIG,COM1,CONFIG COM1 115200*1E'
+  ];
+
+  for (const sentence of sentences) {
+    for (let i = 0; i <= sentence.length; i++) {
+      const truncated = sentence.slice(0, i);
+      const { ctx: c, deltas } = ctx();
+      const parser = createSentenceParser(c);
+      assert.doesNotThrow(() => parser.sentence(truncated), `threw on "${truncated}"`);
+      for (const delta of deltas) {
+        for (const v of delta.updates[0].values) {
+          assert.ok('value' in v, `${v.path} has no value key for "${truncated}"`);
+          assert.notStrictEqual(v.value, undefined, `${v.path} undefined for "${truncated}"`);
+          assert.ok(
+            typeof v.value !== 'number' || Number.isFinite(v.value),
+            `${v.path} is ${v.value} for "${truncated}"`
+          );
+        }
+      }
+    }
+  }
+});
+
 test('CONVERTERS indexes stay within the documented UNIHEADINGA layout', () => {
   for (const c of CONVERTERS.UNIHEADINGA) {
     assert.ok(c.index >= 0 && c.index <= 16, `${c.path} index ${c.index} out of range`);

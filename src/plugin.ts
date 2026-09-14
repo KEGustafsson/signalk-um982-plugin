@@ -728,6 +728,20 @@ const POSITION_TYPE_NO_SOLUTION = 'NONE';
 // (i.e. everything up to first semicolon)
 // which lets field indexes match UM982 documentation
 /**
+ * Build path/value pairs, dropping any whose value is absent.
+ *
+ * `{value: undefined}` serialises to a delta entry with no `value` key, so a
+ * field a truncated sentence never carried must not be published at all.
+ *
+ * @param entries Path to value.
+ * @returns One entry per defined value.
+ */
+const definedValues = (entries: { [path: string]: string | undefined }) =>
+  Object.entries(entries)
+    .filter(([, value]) => value !== undefined)
+    .map(([path, value]) => ({ path, value } as PathValue));
+
+/**
  * Parse a #UNIHEADINGA sentence into Signal K deltas.
  *
  * Validity is judged from sol-stat and pos-type together; when the receiver
@@ -766,17 +780,21 @@ export const uniheadingAParser = (_parts: string[], sentence: string, ctx: Parse
   // measurement, so publish the status fields and null the heading rather than
   // emitting a baseline, standard deviations and satellite counts derived from
   // a sentence the receiver has just declared invalid.
-  const validSolution = solStatus === SOL_STATUS_VALID && posType !== POSITION_TYPE_NO_SOLUTION;
+  // A sentence truncated after the solution status leaves posType undefined,
+  // which would pass the `!== NONE` test and be accepted as a valid solution.
+  const validSolution = solStatus === SOL_STATUS_VALID
+    && Boolean(posType?.trim())
+    && posType !== POSITION_TYPE_NO_SOLUTION;
 
   if (!validSolution) {
     ctx.debug('No valid heading solution (solStatus=%s, posType=%s), setting heading to null', solStatus, posType);
-    // A sentence truncated after the solution status leaves posType
-    // undefined, which serialises as a delta entry with no `value` key at all.
     return [
-      { path: 'sensors.rtk.solutionStatus', value: solStatus },
-      ...(posType === undefined
-        ? []
-        : [{ path: 'sensors.rtk.positionType', value: posType }]),
+      // Only publish fields the sentence actually carried: a `value` of
+      // undefined serialises as a delta entry with no `value` key at all.
+      ...definedValues({
+        'sensors.rtk.solutionStatus': solStatus,
+        'sensors.rtk.positionType': posType
+      }),
       { path: 'navigation.headingTrue', value: null }
     ] as PathValue[];
   }
@@ -789,6 +807,14 @@ export const uniheadingAParser = (_parts: string[], sentence: string, ctx: Parse
       path: c.path,
       value: c.convert(dataFields[c.index], ctx.headingOffset)
     } as PathValue))
+
+  // The heading must be published on every sentence with a data section, even
+  // one truncated before the heading field. Without this a truncated sentence
+  // publishes no heading at all and the last good value stays live in the
+  // model - the stale-heading case this parser exists to prevent.
+  if (!parsed.some(v => v.path === 'navigation.headingTrue')) {
+    parsed.push({ path: 'navigation.headingTrue', value: null } as PathValue);
+  }
 
   ctx.debug('UNIHEADINGA parsed values: %j', parsed);
 
