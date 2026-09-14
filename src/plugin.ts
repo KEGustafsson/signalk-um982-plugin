@@ -454,9 +454,16 @@ const modeParser = (_parts: string[], sentence: string) => {
   if (!dataSection) {
     return [];
   }
+  // Require a non-empty value after the MODE token: a line truncated at
+  // ";MODE" leaves nothing for the replace to strip, and the literal string
+  // "MODE" would be published as the receiver's mode.
+  const match = dataSection.trim().match(/^MODE\s+(.+)$/i);
+  if (!match) {
+    return [];
+  }
   return [{
     path: 'navigation.gnss.um982.mode',
-    value: dataSection.trim().replace(/^MODE\s+/i, '')
+    value: match[1]
   } as PathValue];
 }
 

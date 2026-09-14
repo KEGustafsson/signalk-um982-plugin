@@ -193,6 +193,20 @@ test('#MODE publishes just the mode, without header fields or checksum', () => {
   });
 });
 
+test('a truncated #MODE publishes nothing rather than the literal "MODE"', () => {
+  const { ctx: c, deltas } = ctx();
+  const parser = createSentenceParser(c);
+
+  parser.sentence('#MODE,97,GPS,FINE,2389,362704000,0,0,18;MODE');
+  parser.sentence('#MODE,97,GPS,FINE,2389,362704000,0,0,18;MODE ');
+  parser.sentence('#MODE,97,GPS,FINE,2389,362704000,0,0,18;');
+  assert.strictEqual(deltas.length, 0);
+
+  // A complete sentence still parses.
+  parser.sentence('#MODE,97,GPS,FINE,2389,362704000,0,0,18;MODE ROVER UAV*cf');
+  assert.strictEqual(deltas[0].updates[0].values[0].value, 'ROVER UAV');
+});
+
 test('multiplexed lines are unwrapped, and plain sentences still parse', () => {
   const { ctx: c, deltas } = ctx();
   const parser = createSentenceParser(c);
