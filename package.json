@@ -1,7 +1,7 @@
 {
   "name": "@tkurki/um982",
   "version": "0.0.1",
-  "description": "Signal K plugin and webapp for Unicore UM982 RTK GNSS receivers, with NTRIP client",
+  "description": "Signal K plugin for Unicore UM982 GNSS receiver",
   "main": "dist/plugin.js",
   "signalk": {
     "displayName": "UM982 GNSS"
@@ -28,14 +28,6 @@
     "signalk-node-server-plugin",
     "signalk-webapp"
   ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/KEGustafsson/signalk-um982-plugin.git"
-  },
-  "bugs": {
-    "url": "https://github.com/KEGustafsson/signalk-um982-plugin/issues"
-  },
-  "homepage": "https://github.com/KEGustafsson/signalk-um982-plugin#readme",
   "author": "",
   "license": "Apache-2.0",
   "engines": {
