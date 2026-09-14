@@ -60,7 +60,23 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
   // published as a copy so already-delivered deltas are never mutated.
   let configMap: { [key: string]: string } = {}
 
+  // At server boot the plugins start before the server has enumerated its
+  // serial ports and data connections, so for the first moments of a run the
+  // plugin legitimately knows of neither. Reporting that as an error marked
+  // the plugin failed on every server restart - while toggling it off and on
+  // with the server already up never did, because the property subscriptions
+  // replay what the server already knows. Hold discovery problems as ordinary
+  // status until the server has had time to enumerate.
+  const DISCOVERY_GRACE_MS = 15000;
+  // Undefined while the plugin is not running. The property subscriptions can
+  // still fire before start() and after stop(), and neither should touch the
+  // status.
+  let startedAt: number | undefined = undefined;
+
   const updatePluginStatus = () => {
+    if (startedAt === undefined) {
+      return;
+    }
     const problems: string[] = []
     if (knownNmeaConnections.length === 0) {
       problems.push('No NMEA0183 data connections')
@@ -73,12 +89,23 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
       // count alone, while every command and every RTCM frame is dropped.
       problems.push(`Configured serial port ${currentSerialConnection} is not connected`)
     }
-    if (problems.length > 0) {
-      app.setPluginError(problems.join('; '));
-    } else {
+
+    if (problems.length === 0) {
+      // Signal K keeps a plugin error on the plugin's page until it is
+      // explicitly cleared, so the startup race showed as the plugin's last
+      // error for the life of the server even once every port was found.
+      app.setPluginError('');
       app.setPluginStatus(rtcmReceived
         ? `RTCM data received ${new Date(rtcmReceived).toLocaleTimeString()}`
         : 'No RTCM data received yet');
+      return;
+    }
+
+    const summary = problems.join('; ');
+    if (Date.now() - startedAt < DISCOVERY_GRACE_MS) {
+      app.setPluginStatus(`Starting - ${summary}`);
+    } else {
+      app.setPluginError(summary);
     }
   }
 
@@ -101,14 +128,27 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
     // accumulated list, so appending left an unplugged adapter in the config
     // dropdown until the server restarted.
     knownSerialPorts.length = 0;
-    values.filter(v => v).forEach(({ value }) => {
+    (values ?? []).forEach((entry: any) => {
+      const value = entry?.value;
+      // The list has just been cleared, so a throw on one malformed entry
+      // would leave the plugin believing there is no serial port at all for
+      // the rest of the run. Skip the entry instead.
+      if (!value || typeof value.id !== 'string') {
+        debug('Ignoring serial port entry with no id: %j', entry);
+        return;
+      }
       if (!knownSerialPorts.includes(value.id)) {
         knownSerialPorts.push(value.id);
       }
       if (value.id === currentSerialConnection) {
+        const toStdout = value.eventNames?.toStdout;
+        if (!toStdout) {
+          debug('Serial port %s reports no toStdout event, cannot write to it', value.id);
+          return;
+        }
         matched = true
         serialWrite = (data: string | Buffer) => {
-          (app as any).emit(value.eventNames.toStdout, data);
+          (app as any).emit(toStdout, data);
           return true
         };
       }
@@ -117,6 +157,9 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
       debug('Configured serial port %s not present among %j', currentSerialConnection, knownSerialPorts);
       serialWrite = noSerialPort
     }
+    // The ports arriving is exactly what clears the startup problem, so say so
+    // now rather than leaving it to the next status tick.
+    updatePluginStatus();
   }
 
   const unsubscribeSerialPorts = app.onPropertyValues('serialport', (values) => bindSerialPort(values as any[]))
@@ -209,6 +252,7 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
         app.setPluginError(`Invalid configuration: ${problem}`);
         return;
       }
+      startedAt = Date.now();
       currentSerialConnection = config_.serialconnection;
       const headingOffset = typeof config_.headingOffset === 'number' && Number.isFinite(config_.headingOffset)
         ? config_.headingOffset
@@ -319,6 +363,7 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
         }
       });
       onStop = []
+      startedAt = undefined
       rtcmReceived = undefined
       configMap = {}
       serialWrite = noSerialPort
