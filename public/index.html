@@ -696,7 +696,14 @@
       // Heading history variables
       let headingHistory = []; // Array to store heading history
       let headingAverage = null; // Current heading average
-      const maxHeadingHistory = 300; // 5 minutes at 1 second intervals
+      // The chart shows this window; the subscription uses minPeriod 500, so
+      // samples can arrive at 2Hz. The count cap is derived from the window and
+      // that rate - a fixed 300 assumed 1Hz and silently halved the span shown,
+      // leaving the left half of a "5 minutes" chart permanently empty.
+      const headingHistoryWindowMs = 5 * 60 * 1000;
+      const headingHistoryMaxRateHz = 2;
+      const maxHeadingHistory =
+        (headingHistoryWindowMs / 1000) * headingHistoryMaxRateHz;
       const headingAverageUpdateInterval = 15000; // 15 seconds
       let lastHeadingAverageUpdate = 0;
 
@@ -2317,8 +2324,8 @@
           positionType: samplePositionType || null,
         });
 
-        // Remove old data (older than 5 minutes)
-        const cutoffTime = now - 5 * 60 * 1000;
+        // Remove old data outside the chart window
+        const cutoffTime = now - headingHistoryWindowMs;
         headingHistory = headingHistory.filter(
           (entry) => entry.timestamp > cutoffTime
         );

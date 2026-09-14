@@ -38,6 +38,14 @@ Requires Signal K Server >= v2.18.0 for serial port integration.
 Reference station positions decoded from RTCM 1005/1006 are published under the
 `rtkstations.<id>` context.
 
+### Unverified
+
+The plugin writes both ASCII commands and binary RTCM correction frames to the
+same serial `toStdout` event. If the Signal K serial provider coerces that
+payload to UTF-8 or appends a line terminator, the correction stream would be
+corrupted and the receiver would never reach an RTK fix. This has not been
+checked against a running server - worth confirming before relying on NTRIP.
+
 ## Development
 
 ```

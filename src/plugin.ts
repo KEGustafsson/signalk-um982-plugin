@@ -89,6 +89,10 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
   const bindSerialPort = (values: any[]) => {
     debug('Serial ports: %j', values);
     let matched = false
+    // Replace rather than append: onPropertyValues re-delivers the whole
+    // accumulated list, so appending left an unplugged adapter in the config
+    // dropdown until the server restarted.
+    knownSerialPorts.length = 0;
     values.filter(v => v).forEach(({ value }) => {
       if (!knownSerialPorts.includes(value.id)) {
         knownSerialPorts.push(value.id);
@@ -866,6 +870,12 @@ export function describeConfigurationProblem(obj: any, debug: Debug = noopDebug)
     }
     if (obj.interval <= 0) {
       return `NTRIP interval ${obj.interval} must be positive`;
+    }
+    // 0,0 is what an untouched form yields, not a position anyone configures.
+    // Accepting it sends the caster a reference position in the Gulf of Guinea
+    // and a VRS mountpoint then returns corrections for the wrong place.
+    if (obj.latitude === 0 && obj.longitude === 0) {
+      return 'NTRIP latitude and longitude are both 0 - set the receiver\'s approximate position';
     }
     if (obj.latitude < -90 || obj.latitude > 90) {
       return `NTRIP latitude ${obj.latitude} is out of range`;

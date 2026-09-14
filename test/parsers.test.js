@@ -271,6 +271,14 @@ test('configuration validation explains what is wrong', () => {
   assert.match(describeConfigurationProblem({ ...ntrip, host: '' }), /"host"/);
   assert.match(describeConfigurationProblem({ ...ntrip, latitude: undefined }), /"latitude"/);
   assert.match(describeConfigurationProblem({ ...ntrip, port: 0 }), /port/);
+  // 0,0 is the untouched-form default, not a position anyone configures.
+  assert.match(
+    describeConfigurationProblem({ ...ntrip, latitude: 0, longitude: 0 }),
+    /both 0/
+  );
+  // A real position on one axis is still fine.
+  assert.strictEqual(describeConfigurationProblem({ ...ntrip, latitude: 0 }), undefined);
+  assert.strictEqual(describeConfigurationProblem({ ...ntrip, longitude: 0 }), undefined);
   assert.match(describeConfigurationProblem({ ...ntrip, latitude: 91 }), /latitude/);
 });
 
