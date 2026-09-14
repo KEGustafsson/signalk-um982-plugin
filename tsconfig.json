@@ -10,8 +10,8 @@
     "allowSyntheticDefaultImports": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "declaration": true,
-    "declarationMap": true,
+    "declaration": false,
+    "declarationMap": false,
     "sourceMap": true,
     "moduleResolution": "node",
     "resolveJsonModule": true,
@@ -19,8 +19,5 @@
     "noEmitOnError": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist"],
-  "ts-node": {
-    "esm": false
-  }
+  "exclude": ["node_modules", "dist"]
 }

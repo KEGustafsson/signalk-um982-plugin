@@ -12,6 +12,53 @@ Requires Signal K Server >= v2.18.0 for serial port integration.
 
 - configure the UM982 serial device with 115200 bps
 - the serial connection should show up in the plugin configuration - select & save, rtk connection can be left empty
+- **NTRIP credentials travel in cleartext.** NTRIP v1 is HTTP over a plain TCP
+  socket, and the caster username and password are sent as HTTP Basic
+  (base64, not encryption) on every connection. The protocol has no TLS mode
+  and `ntrip-client` opens no encrypted transport, so anyone on the network
+  path can recover them. Use a caster-specific password you do not reuse
+  elsewhere. Encrypting this would mean replacing the NTRIP transport, not
+  configuring the current one.
+- NTRIP is disabled by default. Tick **NTRIP Enabled** only when you have caster
+  details to enter; every NTRIP field is then required, and the plugin reports
+  which one is missing if you save an incomplete form.
+- set **Heading Offset** to the angle from the bow to the master->slave antenna
+  baseline. It defaults to 90 degrees, which suits an athwartships antenna pair;
+  use 0 for antennas mounted along the centreline.
+
+### Published paths
+
+| Path | Unit | Source |
+| --- | --- | --- |
+| `navigation.headingTrue` | rad | UNIHEADINGA heading / `$--HPR`, plus the heading offset. `null` when the receiver reports no solution |
+| `navigation.attitude.pitch` | rad | UNIHEADINGA pitch |
+| `navigation.satellites.inView` | count | UNIHEADINGA #SVs tracked |
+| `navigation.satellites.used` | count | UNIHEADINGA #SVs in solution |
+| `navigation.gnss.um982.mode` | string | `#MODE` |
+| `sensors.rtk.solutionStatus` | string | UNIHEADINGA sol-stat |
+| `sensors.rtk.positionType` | string | UNIHEADINGA pos-type |
+| `sensors.rtk.baselineLength` | m | UNIHEADINGA baseline length |
+| `sensors.rtk.headingStdDev` | rad | UNIHEADINGA heading standard deviation |
+| `sensors.rtk.pitchStdDev` | rad | UNIHEADINGA pitch standard deviation |
+| `sensors.rtk.um982` | object | `$CONFIG` response |
+
+Reference station positions decoded from RTCM 1005/1006 are published under the
+`rtkstations.<id>` context.
+
+### Unverified
+
+The plugin writes both ASCII commands and binary RTCM correction frames to the
+same serial `toStdout` event. If the Signal K serial provider coerces that
+payload to UTF-8 or appends a line terminator, the correction stream would be
+corrupted and the receiver would never reach an RTK fix. This has not been
+checked against a running server - worth confirming before relying on NTRIP.
+
+## Development
+
+```
+npm install
+npm test     # builds, then runs the parser and geodesy tests
+```
 
 ## TODO
 
@@ -25,5 +72,8 @@ Requires Signal K Server >= v2.18.0 for serial port integration.
 - NTRIP latlon from data
 - work over webusb functionality
 - check main ja slave
-- GPHPR
-- heading offset CONFIG HEADING OFFSET 90 45
+- parse `$GPGSVH` so the webapp's sky plot and SNR charts have a data source
+  (they subscribe to `navigation.gnss.satellitesInView` / `satellitesUsed`,
+  which nothing currently publishes)
+- push the heading offset into the receiver with `CONFIG HEADING OFFSET`
+  instead of applying it in software

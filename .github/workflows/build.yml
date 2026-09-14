@@ -1,0 +1,42 @@
+name: Build
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # This job only builds and tests; it never writes back to the repository.
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        node-version: [20.x, 22.x]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes, so don't leave a token in .git/config where a
+          # later step could reach it.
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Verify the package tarball contains the built entry point
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e "
+            const files = require('./pack.json')[0].files.map(f => f.path);
+            for (const required of ['dist/plugin.js', 'public/index.html']) {
+              if (!files.includes(required)) {
+                console.error('Missing from tarball:', required);
+                console.error('Tarball contains:', files.join(', '));
+                process.exit(1);
+              }
+            }
+            console.log('Tarball OK:', files.length, 'files');
+          "

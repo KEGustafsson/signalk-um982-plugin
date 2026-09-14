@@ -667,6 +667,10 @@
       let satelliteData = {}; // Store satellite data by GNSS system
       let satellitesUsed = []; // Store satellites used in fix
       let cleanupTimer = null; // Timer for periodic cleanup
+      let saveTimer = null; // Timer for periodic IndexedDB saves
+      let reconnectTimer = null; // Pending WebSocket reconnect
+      let reconnectDelay = 1000; // Grows on repeated failures
+      let shouldReconnect = true; // Cleared when the page goes away
       let mainAntennaVisible = true; // Track main antenna visibility
       let slaveAntennaVisible = true; // Track slave antenna visibility
 
@@ -681,7 +685,6 @@
       let trailLayer = null; // Layer for trail dots
       let scaleLineControl = null; // ScaleLine control reference
       let headingArrow = null; // Feature for heading arrow
-      let currentHeading = null; // Current heading in radians
       let headingTrue = null; // True heading in degrees
       let baselineLength = null; // RTK baseline length in meters
       let positionType = null; // RTK position type string
@@ -693,7 +696,14 @@
       // Heading history variables
       let headingHistory = []; // Array to store heading history
       let headingAverage = null; // Current heading average
-      const maxHeadingHistory = 300; // 5 minutes at 1 second intervals
+      // The chart shows this window; the subscription uses minPeriod 500, so
+      // samples can arrive at 2Hz. The count cap is derived from the window and
+      // that rate - a fixed 300 assumed 1Hz and silently halved the span shown,
+      // leaving the left half of a "5 minutes" chart permanently empty.
+      const headingHistoryWindowMs = 5 * 60 * 1000;
+      const headingHistoryMaxRateHz = 2;
+      const maxHeadingHistory =
+        (headingHistoryWindowMs / 1000) * headingHistoryMaxRateHz;
       const headingAverageUpdateInterval = 15000; // 15 seconds
       let lastHeadingAverageUpdate = 0;
 
@@ -924,8 +934,30 @@
         });
       }
 
+      // Both save functions clear and rewrite their whole object store, so
+      // they are throttled rather than run per sample.
+      const SAVE_THROTTLE_MS = 10000;
+      let lastPositionSave = 0;
+      let lastHeadingSave = 0;
+
+      function savePositionHistoryThrottled() {
+        const now = Date.now();
+        if (now - lastPositionSave < SAVE_THROTTLE_MS) return;
+        lastPositionSave = now;
+        savePositionHistory();
+      }
+
+      function saveHeadingHistoryThrottled() {
+        const now = Date.now();
+        if (now - lastHeadingSave < SAVE_THROTTLE_MS) return;
+        lastHeadingSave = now;
+        saveHeadingHistory();
+      }
+
       // Periodic save function
       function saveHistoryPeriodically() {
+        lastPositionSave = Date.now();
+        lastHeadingSave = lastPositionSave;
         savePositionHistory();
         saveHeadingHistory();
       }
@@ -966,8 +998,32 @@
         return systemNames[gnssValue] || gnssValue || "Unknown";
       }
 
+      // Satellite ids and constellation names arrive from the Signal K delta
+      // stream, i.e. from outside this page. They are interpolated into markup
+      // and into inline event handlers below, so escape them at every use.
+      function escapeHtml(value) {
+        return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[c]);
+      }
+
+      function escapeJsString(value) {
+        return String(value ?? "").replace(/[\\'"<>&\r\n]/g, (c) =>
+          "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0")
+        );
+      }
+
       function initTabNavigation() {
-        const buttons = document.querySelectorAll(".tab-button");
+        // Scope to the nav bar: #saveConfigButton and #baselineSetButton reuse
+        // .tab-button for styling but carry no data-tab, so a global selector
+        // made clicking them deactivate every pane and blank the page.
+        const buttons = document.querySelectorAll(
+          ".tab-navigation .tab-button"
+        );
         const panes = document.querySelectorAll(".tab-pane");
 
         buttons.forEach((button) => {
@@ -1039,16 +1095,19 @@
         return `${value} s`;
       }
 
-      async function sendSentenceConfiguration(sentence, intervalValue) {
-        const encodedSentence = encodeURIComponent(sentence);
-        let url = `${pluginBaseUrl}/send/${encodedSentence}`;
+      // `args` is passed through verbatim. It used to be coerced with
+      // Number.parseFloat, which silently truncated "200 5" to 200 and dropped
+      // the baseline tolerance the user had typed.
+      async function sendSentenceConfiguration(
+        sentence,
+        args,
+        summaryText,
+        label
+      ) {
+        let url = `${pluginBaseUrl}/send/${encodeURIComponent(sentence)}`;
 
-        if (intervalValue !== null) {
-          const intervalParam =
-            typeof intervalValue === "number"
-              ? intervalValue
-              : Number.parseFloat(intervalValue);
-          url += `/${intervalParam}`;
+        if (args !== null && args !== undefined && String(args) !== "") {
+          url += `/${encodeURIComponent(String(args))}`;
         }
 
         try {
@@ -1056,20 +1115,27 @@
             method: "POST",
           });
 
+          const body = await response.json().catch(() => null);
+
           if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
+            // The plugin answers with {error: "..."}; surfacing it beats a bare
+            // status code, especially for the 401 a secured server returns.
+            throw new Error(
+              (body && body.error) || `HTTP ${response.status}`
+            );
           }
 
-          const summaryText =
-            intervalValue === null
-              ? "disabled"
-              : `set to ${formatIntervalLabel(intervalValue)}`;
-          showSettingsFeedback(`Sentence ${sentence} ${summaryText}.`);
+          showSettingsFeedback(
+            `Sentence ${label || sentence} ${summaryText || "sent"}.`
+          );
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
           console.error("Failed to send configuration", error);
-          showSettingsFeedback(`Failed to send ${sentence}: ${message}`, true);
+          showSettingsFeedback(
+            `Failed to send ${label || sentence}: ${message}`,
+            true
+          );
         }
       }
 
@@ -1092,15 +1158,24 @@
             }
 
             const value = select.value;
-            const intervalValue =
-              value === "" ? null : Number.parseFloat(value);
-            sendSentenceConfiguration(sentence, intervalValue);
+            if (value === "") {
+              // A bare sentence name is a one-shot query on Unicore firmware,
+              // not a stop. UNLOG is what actually disables the log.
+              sendSentenceConfiguration("UNLOG", sentence, "disabled", sentence);
+              return;
+            }
+            const intervalValue = Number.parseFloat(value);
+            sendSentenceConfiguration(
+              sentence,
+              intervalValue,
+              `set to ${formatIntervalLabel(intervalValue)}`
+            );
           });
         });
 
         if (saveButton) {
           saveButton.addEventListener("click", () => {
-            sendSentenceConfiguration("SAVECONFIG", null);
+            sendSentenceConfiguration("SAVECONFIG", null, "saved");
           });
         }
 
@@ -1166,7 +1241,8 @@
 
             sendSentenceConfiguration(
               "CONFIG HEADING LENGTH",
-              `${lengthValue} ${toleranceValue}`
+              `${lengthValue} ${toleranceValue}`,
+              `set to ${lengthValue} cm +/- ${toleranceValue}`
             );
 
             try {
@@ -1215,8 +1291,13 @@
       }
 
       function isSatelliteUsedInFix(gnssSystem, satId) {
+        // satId is always a string here (it comes from Object.keys), but a
+        // producer publishing numeric ids is the natural JSON encoding, and
+        // 12 === "12" is false.
         return satellitesUsed.some(
-          (usedSat) => usedSat.gnss === gnssSystem && usedSat.id === satId
+          (usedSat) =>
+            String(usedSat.gnss) === String(gnssSystem) &&
+            String(usedSat.id) === String(satId)
         );
       }
 
@@ -1287,10 +1368,10 @@
               satelliteElements += `
                 <circle class="satellite-circle" cx="${x}" cy="${y}" r="${size}" 
                         fill="${color}" stroke="${borderColor}" stroke-width="${borderWidth}" 
-                        data-system="${gnssSystem}" data-sat="${satId}">
-                  <title>${getGnssSystemName(
+                        data-system="${escapeHtml(gnssSystem)}" data-sat="${escapeHtml(satId)}">
+                  <title>${escapeHtml(getGnssSystemName(
                     gnssSystem
-                  )} ${satId}: ${antennaData.SNR.toFixed(
+                  ))} ${escapeHtml(satId)}: ${antennaData.SNR.toFixed(
                 1
               )}dB, Az:${azimuthDeg.toFixed(0)}°, El:${elevationDeg.toFixed(
                 0
@@ -1298,7 +1379,7 @@
                 </circle>
                 <text class="satellite-text" x="${x}" y="${y - size - 3}" 
                       text-anchor="middle" font-size="10" fill="black" 
-                      data-system="${gnssSystem}" data-sat="${satId}">${satId}</text>
+                      data-system="${escapeHtml(gnssSystem)}" data-sat="${escapeHtml(satId)}">${escapeHtml(satId)}</text>
               `;
             }
           });
@@ -1479,10 +1560,10 @@
 
           html += `
             <div class="satellite-item" style="margin: 8px 0; display: flex; align-items: center;" 
-                 onmouseover="highlightSatellite('${gnssSystem}', '${satId}')" 
+                 onmouseover="highlightSatellite('${escapeJsString(gnssSystem)}', '${escapeJsString(satId)}', this)" 
                  onmouseout="clearSatelliteHighlight()">
               <div class="sat-label" style="width: 60px; font-size: 12px; text-align: right; margin-right: 10px; font-weight: bold; ${labelStyle}">
-                ${satId}
+                ${escapeHtml(satId)}
               </div>
               <div class="sat-bars" style="flex: 1;">
                 <div class="antenna-bar main-antenna-bar" style="display: ${
@@ -1514,7 +1595,7 @@
         return html;
       }
 
-      function highlightSatellite(gnssSystem, satId) {
+      function highlightSatellite(gnssSystem, satId, currentItem) {
         // Hide satellites from other systems in polar chart
         document.querySelectorAll(".satellite-circle").forEach((circle) => {
           const circleSystem = circle.getAttribute("data-system");
@@ -1568,9 +1649,11 @@
           item.style.backgroundColor = "transparent";
         });
 
-        // Find and highlight the current item
-        const currentItem = event.currentTarget;
-        currentItem.style.backgroundColor = "rgba(0, 123, 255, 0.1)";
+        // Passed in explicitly: relying on the implicit global `event` broke
+        // for any programmatic call.
+        if (currentItem) {
+          currentItem.style.backgroundColor = "rgba(0, 123, 255, 0.1)";
+        }
 
         // Update satellite info display
         updateSatelliteInfoDisplay(gnssSystem, satId);
@@ -1615,7 +1698,9 @@
         const satellite =
           satelliteData[gnssSystem] && satelliteData[gnssSystem][satId];
         if (!satellite) {
-          infoContent.innerHTML = `<div style="color: #dc3545;">No data available for ${gnssSystem} ${satId}</div>`;
+          infoContent.innerHTML = `<div style="color: #dc3545;">No data available for ${escapeHtml(
+            gnssSystem
+          )} ${escapeHtml(satId)}</div>`;
           return;
         }
 
@@ -1626,7 +1711,9 @@
 
         // Get signals information from satellitesUsed data
         const usedSatellite = satellitesUsed.find(
-          (sat) => sat.gnss === gnssSystem && sat.id === satId
+          (sat) =>
+            String(sat.gnss) === String(gnssSystem) &&
+            String(sat.id) === String(satId)
         );
         const signals =
           usedSatellite && usedSatellite.signals ? usedSatellite.signals : [];
@@ -1636,9 +1723,9 @@
         let html = `
           <div style="display: flex; flex-direction: column; gap: 8px;">
             <div style="font-weight: bold; color: #333;">
-              ${getGnssSystemName(
+              ${escapeHtml(getGnssSystemName(
                 gnssSystem
-              )} Satellite ${satId} (${antennaLabel} Antenna)
+              ))} Satellite ${escapeHtml(satId)} (${antennaLabel} Antenna)
             </div>
         `;
 
@@ -1730,11 +1817,9 @@
         const titleElement = document.getElementById("polarChartTitle");
         if (!titleElement) return;
 
-        if (mainAntennaVisible && slaveAntennaVisible) {
+        if (mainAntennaVisible) {
           titleElement.textContent = "Satellite Positions (Main Antenna)";
-        } else if (mainAntennaVisible && !slaveAntennaVisible) {
-          titleElement.textContent = "Satellite Positions (Main Antenna)";
-        } else if (!mainAntennaVisible && slaveAntennaVisible) {
+        } else if (slaveAntennaVisible) {
           titleElement.textContent = "Satellite Positions (Slave Antenna)";
         } else {
           titleElement.textContent = "Satellite Positions (No Data)";
@@ -1754,7 +1839,25 @@
         }, 60000); // Every minute
       }
 
+      const MAX_RECONNECT_DELAY = 30000;
+
       function connectWebSocket() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        // Detach the previous socket's handlers before replacing it, otherwise
+        // its onclose schedules a reconnect of its own and connections
+        // multiply.
+        if (ws) {
+          ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+          try {
+            ws.close();
+          } catch (error) {
+            /* already closing */
+          }
+        }
+
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const wsUrl = `${protocol}//${window.location.host}/signalk/v1/stream?subscribe=none`;
 
@@ -1763,6 +1866,7 @@
         ws.onopen = function () {
           document.getElementById("status").textContent = "Connected";
           document.getElementById("status").className = "status connected";
+          reconnectDelay = 1000;
 
           // Subscribe to satellites in view and position for self vessel only
           ws.send(
@@ -1813,13 +1917,20 @@
         };
 
         ws.onmessage = function (event) {
-          const data = JSON.parse(event.data);
+          let data;
+          try {
+            data = JSON.parse(event.data);
+          } catch (error) {
+            // A non-JSON or binary frame must not abort the handler.
+            return;
+          }
+          if (!data || typeof data !== "object") {
+            return;
+          }
 
           if (data.updates) {
             data.updates.forEach((update) => {
-              if (update.values && update.$source) {
-                let source = update.$source;
-
+              if (update.values) {
                 update.values
                   .filter(
                     (value) =>
@@ -1875,16 +1986,23 @@
                         updateMapPosition(lat, lon);
                       }
                     }
-                  } else if (
-                    value.path === "navigation.headingTrue" &&
-                    value.value !== undefined
-                  ) {
-                    // Heading is in radians
-                    currentHeading = value.value;
-                    headingTrue = (value.value * 180) / Math.PI; // Convert to degrees
-                    addHeadingToHistory(headingTrue, positionType);
-                    updateHeadingArrow();
-                    updateHeadingTrueDisplay();
+                  } else if (value.path === "navigation.headingTrue") {
+                    // The plugin publishes null when the receiver has no
+                    // heading solution. `null * 180 / Math.PI` is 0, so
+                    // guarding only on undefined turned "no fix" into a
+                    // confident due-north reading and poisoned the history
+                    // chart with bogus 0 samples.
+                    if (value.value === null || value.value === undefined) {
+                      headingTrue = null;
+                      updateHeadingArrow();
+                      updateHeadingTrueDisplay();
+                    } else {
+                      // Heading is in radians
+                      headingTrue = (value.value * 180) / Math.PI; // Convert to degrees
+                      addHeadingToHistory(headingTrue, positionType);
+                      updateHeadingArrow();
+                      updateHeadingTrueDisplay();
+                    }
                   } else if (
                     value.path === "sensors.rtk.baselineLength" &&
                     value.value !== undefined
@@ -1917,8 +2035,12 @@
           document.getElementById("status").textContent = "Disconnected";
           document.getElementById("status").className = "status disconnected";
 
-          // Attempt to reconnect after 3 seconds
-          setTimeout(connectWebSocket, 3000);
+          if (!shouldReconnect) {
+            return;
+          }
+          // Back off instead of hammering a server that is down.
+          reconnectTimer = setTimeout(connectWebSocket, reconnectDelay);
+          reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
         };
 
         ws.onerror = function (error) {
@@ -2047,10 +2169,10 @@
         // Update marker position
         positionMarker.getGeometry().setCoordinates(newCoord);
 
-        // Save to IndexedDB every 3rd position update to avoid data loss
-        if (positionTrail.length % 3 === 0) {
-          savePositionHistory();
-        }
+        // Throttled by time, not by array length: both buffers are capped, so
+        // once they saturate `length % n` is constant - the position save then
+        // never fired again and the heading save fired on every sample.
+        savePositionHistoryThrottled();
 
         // Center map on new position
         map.getView().setCenter(newCoord);
@@ -2144,11 +2266,14 @@
       }
 
       function updateHeadingArrow() {
-        if (
-          !headingArrow ||
-          headingTrue === null ||
-          headingTrue === undefined
-        ) {
+        if (!headingArrow) {
+          return;
+        }
+
+        // No heading solution: clear the arrow rather than leaving the last
+        // known bearing on screen.
+        if (headingTrue === null || headingTrue === undefined) {
+          headingArrow.getGeometry().setCoordinates([]);
           return;
         }
 
@@ -2199,8 +2324,8 @@
           positionType: samplePositionType || null,
         });
 
-        // Remove old data (older than 5 minutes)
-        const cutoffTime = now - 5 * 60 * 1000;
+        // Remove old data outside the chart window
+        const cutoffTime = now - headingHistoryWindowMs;
         headingHistory = headingHistory.filter(
           (entry) => entry.timestamp > cutoffTime
         );
@@ -2219,10 +2344,7 @@
         // Update the chart
         updateHeadingChart();
 
-        // Save to IndexedDB every 5th heading update to avoid data loss
-        if (headingHistory.length % 5 === 0) {
-          saveHeadingHistory();
-        }
+        saveHeadingHistoryThrottled();
       }
 
       function updateHeadingAverage() {
@@ -2497,8 +2619,14 @@
 
         // If we have a current position type, highlight it
         if (positionType !== null && positionType !== undefined) {
+          // positionType is raw device text; an unescaped quote or bracket
+          // makes querySelector throw and aborts the whole delta handler.
           const activeRow = document.querySelector(
-            `[data-type="${positionType}"]`
+            `[data-type="${
+              window.CSS && CSS.escape
+                ? CSS.escape(positionType)
+                : String(positionType).replace(/["\\]/g, "\\$&")
+            }"]`
           );
           if (activeRow) {
             const color = getPositionTypeColor(positionType);
@@ -2546,10 +2674,10 @@
         }
       }
 
-      // Initialize map after DOM is ready
-      setTimeout(() => {
-        initializeMap();
-      }, 100);
+      // The script runs at the end of <body>, so the DOM is ready. The old
+      // 100ms timer raced the IndexedDB restore below, which silently dropped
+      // the stored trail whenever it won.
+      initializeMap();
 
       // Initialize IndexedDB and load stored data
       initIndexedDB()
@@ -2570,7 +2698,7 @@
           }
 
           // Set up periodic saving (every 30 seconds)
-          setInterval(saveHistoryPeriodically, 30000);
+          saveTimer = setInterval(saveHistoryPeriodically, 30000);
 
           console.log(
             `Loaded ${storedPositions.length} position points and ${storedHeadings.length} heading points from storage`
@@ -2588,6 +2716,35 @@
       updatePolarChartTitle();
 
       connectWebSocket();
+
+      // A backgrounded or closed tab kept a 2Hz stream and two intervals
+      // running, and never flushed pending history.
+      window.addEventListener("pageshow", (event) => {
+        if (!event.persisted) return;
+        // Restored from the back/forward cache: everything below was torn down
+        // on pagehide, so bring it back rather than leaving a dead page.
+        shouldReconnect = true;
+        reconnectDelay = 1000;
+        startCleanupTimer();
+        saveTimer = setInterval(saveHistoryPeriodically, 30000);
+        connectWebSocket();
+      });
+
+      window.addEventListener("pagehide", () => {
+        shouldReconnect = false;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        if (cleanupTimer) clearInterval(cleanupTimer);
+        if (saveTimer) clearInterval(saveTimer);
+        saveHistoryPeriodically();
+        if (ws) {
+          ws.onclose = null;
+          try {
+            ws.close();
+          } catch (error) {
+            /* already closing */
+          }
+        }
+      });
     </script>
   </body>
 </html>
