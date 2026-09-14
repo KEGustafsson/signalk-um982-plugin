@@ -150,3 +150,55 @@ test('a malformed serial port entry does not blind the plugin to the others', (t
   assert.ok(errors.includes(''), `should still find the good port, got ${JSON.stringify(errors)}`);
   assert.strictEqual(statuses[statuses.length - 1], 'No RTCM data received yet');
 });
+
+test('an NTRIP startup failure is not wiped by the next status refresh', (t) => {
+  // The status refresh runs every second and clears the plugin error when
+  // discovery is healthy. Without a separate hold, it replaced "Could not
+  // start NTRIP client: ..." with "No RTCM data received yet" a second later,
+  // and the operator never learned why corrections were missing.
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+
+  // Patch the module the plugin resolves startRTCM through, so the failure
+  // path is exercised without a caster.
+  const ntrip = require('../dist/ntrip.js');
+  const realStartRTCM = ntrip.startRTCM;
+  ntrip.startRTCM = () => { throw new Error('caster unreachable'); };
+  t.after(() => { ntrip.startRTCM = realStartRTCM; });
+
+  const { app, errors, statuses, deliver } = fakeApp();
+  const plugin = pluginFactory(app);
+  t.after(() => plugin.stop());
+
+  plugin.start({
+    ...CONFIG,
+    ntripEnabled: true,
+    host: 'caster.example', mountpoint: 'MP', username: 'u', password: 'p',
+    port: 2101, interval: 2000, latitude: 60, longitude: 25
+  });
+  deliver('pipedprovider', providerValues());
+  deliver('serialport', serialPortValues('/dev/ttyUSB0'));
+
+  t.mock.timers.tick(1000);   // the startup timer fires, startRTCM throws
+  assert.ok(
+    errors.some(e => e.includes('Could not start NTRIP client')),
+    `the startup failure must be reported, got ${JSON.stringify(errors)}`
+  );
+
+  const statusesBefore = statuses.length;
+  t.mock.timers.tick(1000);   // the status refresh must not erase it
+
+  assert.ok(
+    errors[errors.length - 1].includes('Could not start NTRIP client'),
+    `the startup failure must survive the status refresh, got ${JSON.stringify(errors.slice(-3))}`
+  );
+  assert.ok(
+    !errors.slice(-1).includes(''),
+    'the refresh must not clear the plugin error while the failure stands'
+  );
+  // The refresh must not report the plugin healthy over the top of it.
+  assert.deepStrictEqual(
+    statuses.slice(statusesBefore),
+    [],
+    `no healthy status may be published while NTRIP is failed, got ${JSON.stringify(statuses.slice(statusesBefore))}`
+  );
+});

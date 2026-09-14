@@ -72,6 +72,12 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
   // still fire before start() and after stop(), and neither should touch the
   // status.
   let startedAt: number | undefined = undefined;
+  // Held separately from the plugin error, because the status refresh below
+  // clears that error whenever discovery is healthy - which would replace a
+  // failure to start the NTRIP client with "No RTCM data received yet" a
+  // second later, leaving no trace of why corrections never arrive. It lasts
+  // for the run: a startRTCM that threw is not retried.
+  let ntripStartupError: string | undefined = undefined;
 
   const updatePluginStatus = () => {
     if (startedAt === undefined) {
@@ -88,6 +94,13 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
       // receiver while an AIS adapter stays connected looks healthy by port
       // count alone, while every command and every RTCM frame is dropped.
       problems.push(`Configured serial port ${currentSerialConnection} is not connected`)
+    }
+
+    // A client that failed to start is a settled fault rather than a startup
+    // race, so it is reported at once and goes on being reported.
+    if (ntripStartupError) {
+      app.setPluginError([ntripStartupError, ...problems].join('; '));
+      return;
     }
 
     if (problems.length === 0) {
@@ -253,6 +266,7 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
         return;
       }
       startedAt = Date.now();
+      ntripStartupError = undefined;
       currentSerialConnection = config_.serialconnection;
       const headingOffset = typeof config_.headingOffset === 'number' && Number.isFinite(config_.headingOffset)
         ? config_.headingOffset
@@ -311,7 +325,8 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
             })
             onStop.push(closeRTCM);
           } catch (e: any) {
-            app.setPluginError(`Could not start NTRIP client: ${e?.message ?? e}`);
+            ntripStartupError = `Could not start NTRIP client: ${e?.message ?? e}`;
+            updatePluginStatus();
           }
         }
       }, 1000);
@@ -364,6 +379,7 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
       });
       onStop = []
       startedAt = undefined
+      ntripStartupError = undefined
       rtcmReceived = undefined
       configMap = {}
       serialWrite = noSerialPort
