@@ -64,6 +64,11 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
     }
     if (knownSerialPorts.length === 0) {
       problems.push('No serial ports detected')
+    } else if (currentSerialConnection && serialWrite === noSerialPort) {
+      // Some port is enumerated, just not the configured one - unplugging the
+      // receiver while an AIS adapter stays connected looks healthy by port
+      // count alone, while every command and every RTCM frame is dropped.
+      problems.push(`Configured serial port ${currentSerialConnection} is not connected`)
     }
     if (problems.length > 0) {
       app.setPluginError(problems.join('; '));
@@ -240,8 +245,12 @@ const pluginFactory: PluginConstructor = function (app: ServerAPI): Plugin {
             const closeRTCM = startRTCM({
               options: config_,
               onData: (data: Buffer) => {
-                serialWrite(data)
-                rtcmReceived = Date.now()
+                // Only a frame that reached the receiver counts: reporting
+                // "RTCM data received" while every frame is dropped on the
+                // floor hides the one fault the status line exists to show.
+                if (serialWrite(data)) {
+                  rtcmReceived = Date.now()
+                }
               },
               onError: (e) => {
                 debug('RTCM error: %o', e)
@@ -507,9 +516,12 @@ export const headingToRadians = (headingDeg: number, offsetDeg: number): number 
  *   reports no fix.
  */
 const hprParser = (parts: string[], _sentence: string, ctx: ParserContext) => {
-  const qf = parts[5];
-  const heading = parseFloat(parts[2]);
-  ctx.debug('HPR fields: %j (heading=%s, QF=%s)', parts, parts[2], qf);
+  // `$GNHPR,123519.00,27` is indistinguishable from a complete sentence
+  // reporting a heading of 27 degrees, so the final field is never parsed.
+  const fields = completeFields(parts);
+  const qf = fields[5];
+  const heading = parseFloat(fields[2]);
+  ctx.debug('HPR fields: %j (heading=%s, QF=%s)', fields, fields[2], qf);
   const noFix = qf !== undefined
     ? qf === '0' || qf === ''
     : isNaN(heading) || heading === 0;
@@ -740,6 +752,21 @@ const POSITION_TYPE_NO_SOLUTION = 'NONE';
  * @param entries Path to value.
  * @returns One entry per defined value.
  */
+/**
+ * Drop the final field of a sentence, which may be a fragment.
+ *
+ * A read cut short ends inside whatever field came last, and a fragment is
+ * indistinguishable from a complete field: `...,2.7889,2` looks exactly like a
+ * record whose heading really is 2 degrees, and would publish 92 degrees once
+ * the offset is applied. Only a field that a delimiter follows is known to be
+ * whole, so the last one is never parsed. A complete sentence loses only its
+ * trailing field, which no converter here reads.
+ *
+ * @param fields The sentence's fields, in order, checksum already removed.
+ * @returns The leading fields that are known to be complete.
+ */
+const completeFields = (fields: string[]) => fields.slice(0, -1);
+
 const definedValues = (entries: { [path: string]: string | undefined }) =>
   Object.entries(entries)
     .filter(([, value]) => value !== undefined)
@@ -771,11 +798,17 @@ export const uniheadingAParser = (_parts: string[], sentence: string, ctx: Parse
 
   // Parse data section by commas (remove checksum if present)
   const dataFields = dataSection.split('*')[0].split(',');
+  const whole = completeFields(dataFields);
 
   ctx.debug('UNIHEADINGA data fields: %j', dataFields);
 
+  // Matching an exact constant is safe on a fragment - no truncation of a
+  // longer status yields SOL_COMPUTED - so the status is read from the raw
+  // fields and still published when it is all the sentence carried.
   const solStatus = dataFields[SOLUTION_STATUS_INDEX];
-  const posType = dataFields[POSITION_TYPE_INDEX];
+  // The position type is tested by inequality, so a fragment of NONE (say
+  // `NON`) would pass the `!== NONE` test below and be read as a solution.
+  const posType = whole[POSITION_TYPE_INDEX];
 
   // Per the manual's guidance, judge validity from sol-stat + pos-type
   // together: accept the sentence when the solution is computed and the
@@ -806,7 +839,7 @@ export const uniheadingAParser = (_parts: string[], sentence: string, ctx: Parse
   const parsed = CONVERTERS.UNIHEADINGA
     // A truncated sentence would otherwise yield NaN / undefined values, which
     // reach the full model and only become null at serialisation time.
-    .filter(c => c.index < dataFields.length)
+    .filter(c => c.index < whole.length)
     .map(c => ({
       path: c.path,
       value: c.convert(dataFields[c.index], ctx.headingOffset)

@@ -44,6 +44,15 @@ const UNIHEADINGA_FIX =
   '#UNIHEADINGA,93,GPS,FINE,2385,326592000,0,0,18,10;' +
   'SOL_COMPUTED,L1_INT,2.7889,296.7233,-25.7710,0.0000,0.1127,0.1812,"999",49,37,37,0,3,00,1,51*1a';
 
+// One real, complete sentence per parser, used by the truncation sweeps.
+const TRUNCATION_SENTENCES = [
+  UNIHEADINGA_FIX,
+  '#MODE,97,GPS,FINE,2389,362704000,0,0,18;MODE ROVER UAV*cf',
+  '#BESTSATA,90,GPS,FINE,2389,362704000,0,0,18,24;2,GPS,1,GOOD,00000017,GLO,2,GOOD,00000011*aa',
+  '$GNHPR,123519.00,270.00,1.00,0.00,4,20,0.0,0*1a',
+  '$CONFIG,COM1,CONFIG COM1 115200*1E'
+];
+
 test('UNIHEADINGA maps every field to the quantity it actually carries', () => {
   const { ctx: c } = ctx();
   const values = uniheadingAParser([], UNIHEADINGA_FIX.split('*')[0], c);
@@ -118,6 +127,44 @@ test('UNIHEADINGA truncated before the position type omits it entirely', () => {
     assert.ok('value' in v, `${v.path} has no value key`);
     assert.notStrictEqual(v.value, undefined, `${v.path} is undefined`);
   }
+});
+
+test('UNIHEADINGA truncated inside a numeric field publishes no heading', () => {
+  // `SOL_COMPUTED,L1_INT,2.7889,2` is a sentence cut inside the heading field:
+  // it passes the sol-stat/pos-type validity test, and parseFloat('2') used to
+  // publish a heading of 92 degrees rather than the true 26.7233.
+  const header = '#UNIHEADINGA,93,GPS,FINE,2385,326592000,0,0,18,10;';
+  for (const body of [
+    'SOL_COMPUTED,L1_INT,2.7889,2',
+    'SOL_COMPUTED,L1_INT,2.7889,29',
+    'SOL_COMPUTED,L1_INT,2.7889,296.7'
+  ]) {
+    const { ctx: c } = ctx();
+    const values = uniheadingAParser([], header + body, c);
+    assert.strictEqual(valueOf(values, 'navigation.headingTrue'), null, `for "${body}"`);
+  }
+
+  // The fields a delimiter follows are whole, so they are still published.
+  const { ctx: c } = ctx();
+  const values = uniheadingAParser([], header + 'SOL_COMPUTED,L1_INT,2.7889,2', c);
+  assert.strictEqual(valueOf(values, 'sensors.rtk.baselineLength'), 2.7889);
+});
+
+test('HPR truncated inside the heading field publishes no heading', () => {
+  // Same defect as UNIHEADINGA: `$GNHPR,123519.00,27` has no quality field, so
+  // the fragment 27 used to be accepted and published as 117 degrees.
+  for (const sentence of ['$GNHPR,123519.00,2', '$GNHPR,123519.00,27', '$GNHPR,123519.00,270.0']) {
+    const { ctx: c, deltas } = ctx();
+    createSentenceParser(c).sentence(sentence);
+    const values = deltas.flatMap(d => d.updates[0].values);
+    assert.strictEqual(valueOf(values, 'navigation.headingTrue'), null, `for "${sentence}"`);
+  }
+
+  const { ctx: c, deltas } = ctx();
+  createSentenceParser(c).sentence('$GNHPR,123519.00,270.00,1.00,0.00,4,20,0.0,0*1a');
+  const values = deltas.flatMap(d => d.updates[0].values);
+  // 270 + 90 offset wraps to 0.
+  assert.ok(Math.abs(deg(valueOf(values, 'navigation.headingTrue')) - 0) < 1e-9);
 });
 
 test('UNIHEADINGA with no data section yields nothing', () => {
@@ -321,19 +368,47 @@ test('UNIHEADINGA always publishes a heading, however truncated the sentence', (
   }
 });
 
+test('a truncated sentence never publishes a number the whole one would not', () => {
+  // The no-NaN sweep below passes a sentence cut inside a numeric field: a
+  // fragment parses to a finite number, just the wrong one, which is how
+  // `...,2.7889,2` published a heading of 92 degrees. Truncation may drop a
+  // field or null it, but must never change a value, so every number a
+  // truncated sentence publishes is compared against the whole sentence's.
+  const expected = new Map();
+  for (const sentence of TRUNCATION_SENTENCES) {
+    const { ctx: c, deltas } = ctx();
+    createSentenceParser(c).sentence(sentence);
+    for (const delta of deltas) {
+      for (const v of delta.updates[0].values) {
+        expected.set(`${sentence}|${v.path}`, v.value);
+      }
+    }
+  }
+
+  for (const sentence of TRUNCATION_SENTENCES) {
+    for (let i = 0; i <= sentence.length; i++) {
+      const truncated = sentence.slice(0, i);
+      const { ctx: c, deltas } = ctx();
+      createSentenceParser(c).sentence(truncated);
+      for (const delta of deltas) {
+        for (const v of delta.updates[0].values) {
+          if (typeof v.value !== 'number') continue;
+          assert.strictEqual(
+            v.value,
+            expected.get(`${sentence}|${v.path}`),
+            `${v.path} is ${v.value} for "${truncated}", not the whole sentence's value`
+          );
+        }
+      }
+    }
+  }
+});
+
 test('every parser survives progressive truncation of a real sentence', () => {
   // Systematic sweep rather than hand-picked cases: truncate each sentence at
   // every character boundary and assert nothing throws and nothing publishes
   // an undefined or NaN value.
-  const sentences = [
-    UNIHEADINGA_FIX,
-    '#MODE,97,GPS,FINE,2389,362704000,0,0,18;MODE ROVER UAV*cf',
-    '#BESTSATA,90,GPS,FINE,2389,362704000,0,0,18,24;2,GPS,1,GOOD,00000017,GLO,2,GOOD,00000011*aa',
-    '$GNHPR,123519.00,270.00,1.00,0.00,4,20,0.0,0*1a',
-    '$CONFIG,COM1,CONFIG COM1 115200*1E'
-  ];
-
-  for (const sentence of sentences) {
+  for (const sentence of TRUNCATION_SENTENCES) {
     for (let i = 0; i <= sentence.length; i++) {
       const truncated = sentence.slice(0, i);
       const { ctx: c, deltas } = ctx();

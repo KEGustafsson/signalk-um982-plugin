@@ -12,6 +12,13 @@ Requires Signal K Server >= v2.18.0 for serial port integration.
 
 - configure the UM982 serial device with 115200 bps
 - the serial connection should show up in the plugin configuration - select & save, rtk connection can be left empty
+- **NTRIP credentials travel in cleartext.** NTRIP v1 is HTTP over a plain TCP
+  socket, and the caster username and password are sent as HTTP Basic
+  (base64, not encryption) on every connection. The protocol has no TLS mode
+  and `ntrip-client` opens no encrypted transport, so anyone on the network
+  path can recover them. Use a caster-specific password you do not reuse
+  elsewhere. Encrypting this would mean replacing the NTRIP transport, not
+  configuring the current one.
 - NTRIP is disabled by default. Tick **NTRIP Enabled** only when you have caster
   details to enter; every NTRIP field is then required, and the plugin reports
   which one is missing if you save an incomplete form.

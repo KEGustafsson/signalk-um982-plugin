@@ -1,5 +1,11 @@
 import { RtcmMessage, RtcmTransport } from '@gnss/rtcm';
 import { Position } from '@signalk/server-api';
+// ntrip-client 1.1.1 dials net.createConnection and sends HTTP Basic
+// credentials over that plain TCP socket: NTRIP v1 has no TLS mode, and the
+// library exposes no way to supply one. Credentials are therefore readable by
+// anyone on the network path, which the configuration form says plainly and
+// startRTCM warns about in the log. Encrypting this means replacing the
+// transport with an NTRIP-over-TLS client, not configuring this one.
 import { NtripClient } from 'ntrip-client';
 
 export interface NtripOptions {
@@ -47,11 +53,13 @@ export const NtripOptionsSchema = {
     },
     username: {
       type: "string",
-      title: "Username"
+      title: "Username",
+      description: "Caster username. NTRIP v1 is HTTP over a plain TCP socket, so this is sent unencrypted - see the Password field"
     },
     password: {
       type: "string",
-      title: "Password"
+      title: "Password",
+      description: "Caster password. NTRIP v1 carries HTTP Basic credentials over an unencrypted socket, so anyone on the path can read them: use a caster-specific password you do not reuse elsewhere"
     },
     latitude: {
       type: "number",
@@ -117,6 +125,13 @@ export const startRTCM = (params: NtripConfig): (() => void) => {
   const xyz = latLonToECEF(options.latitude, options.longitude, 0);
   if (!xyz.every(Number.isFinite)) {
     throw new Error(`Invalid NTRIP reference position: ${options.latitude}, ${options.longitude}`);
+  }
+
+  if (options.password) {
+    // Stated once per connection attempt rather than silently: the credential
+    // leaves the machine in cleartext and the operator is the only one who can
+    // decide whether that is acceptable on their network.
+    debug('WARNING: NTRIP v1 sends the caster username and password unencrypted over TCP to %s:%s', options.host, options.port);
   }
 
   const options_: NtripOptions = {
